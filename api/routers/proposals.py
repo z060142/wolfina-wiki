@@ -25,15 +25,25 @@ async def create_proposal(
 
 @router.get("", response_model=list[ProposalRead])
 async def list_proposals(
-    page_id: str | None = Query(None),
+    page_id: str | None = Query(None, description="Filter by target page ID"),
     status: ProposalStatus | None = Query(None),
+    proposer_agent_id: str | None = Query(None, description="Filter by proposer agent"),
+    batch_id: str | None = Query(None, description="Filter by batch ID"),
+    source_session_id: str | None = Query(None, description="Filter by source session ID"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     agent_id: str = Depends(get_current_agent),
 ) -> list[ProposalRead]:
     proposals = await proposal_service.list_proposals(
-        db, page_id=page_id, status=status, limit=limit, offset=offset
+        db,
+        page_id=page_id,
+        status=status,
+        proposer_agent_id=proposer_agent_id,
+        batch_id=batch_id,
+        source_session_id=source_session_id,
+        limit=limit,
+        offset=offset,
     )
     return [ProposalRead.model_validate(p) for p in proposals]
 

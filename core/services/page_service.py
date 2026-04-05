@@ -7,13 +7,13 @@ It is the single source of truth for page state.
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import asc, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from core.exceptions import Conflict, NotFound
 from core.models.page import Page, PageRelation, PageStatus, RelationType
-from core.schemas.page import PageCreate, PageSearchParams, RelationCreate
+from core.schemas.page import PageCreate, PageSearchParams, RelationCreate, SortField, SortOrder
 
 
 async def create_page(db: AsyncSession, data: PageCreate) -> Page:
@@ -92,7 +92,18 @@ async def search_pages(db: AsyncSession, params: PageSearchParams) -> list[Page]
         )
     if params.status:
         stmt = stmt.where(Page.status == params.status)
-    stmt = stmt.order_by(Page.updated_at.desc()).offset(params.offset).limit(params.limit)
+    if params.updated_after:
+        stmt = stmt.where(Page.updated_at > params.updated_after)
+
+    # Dynamic sort column + direction.
+    sort_col = {
+        SortField.updated_at: Page.updated_at,
+        SortField.created_at: Page.created_at,
+        SortField.title: Page.title,
+    }[params.sort_by]
+    order_fn = desc if params.sort_order == SortOrder.desc else asc
+    stmt = stmt.order_by(order_fn(sort_col)).offset(params.offset).limit(params.limit)
+
     result = await db.scalars(stmt)
     return list(result.all())
 

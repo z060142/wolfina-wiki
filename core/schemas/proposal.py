@@ -19,6 +19,14 @@ class ProposalCreate(BaseModel):
     rationale: str = Field(..., min_length=1)
     proposer_agent_id: str = Field(..., min_length=1)
 
+    # --- Traceability / idempotency ---
+    # Supply a stable key (e.g. hash of content) so retries return the existing proposal.
+    idempotency_key: str | None = Field(None, max_length=256)
+    # Which agent session/conversation window produced this proposal.
+    source_session_id: str | None = Field(None, max_length=256)
+    # Groups proposals submitted together from one reasoning run.
+    batch_id: str | None = Field(None, max_length=256)
+
 
 class ReviewRequest(BaseModel):
     reviewer_agent_id: str = Field(..., min_length=1)
@@ -55,6 +63,9 @@ class ProposalRead(BaseModel):
     rationale: str
     proposer_agent_id: str
     status: ProposalStatus
+    idempotency_key: str | None
+    source_session_id: str | None
+    batch_id: str | None
     created_at: datetime
     updated_at: datetime
     reviews: list[ProposalReviewRead] = []

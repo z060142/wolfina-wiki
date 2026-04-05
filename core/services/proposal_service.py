@@ -20,6 +20,20 @@ from core.settings import settings
 
 
 async def create_proposal(db: AsyncSession, data: ProposalCreate) -> EditProposal:
+    # --- Idempotency check (must be first) ---
+    # If the caller supplies an idempotency_key and we already have a proposal with that
+    # key, return it immediately without creating a duplicate.  This handles agent retries
+    # gracefully regardless of the original proposal's current status.
+    if data.idempotency_key:
+        existing = await db.scalar(
+            select(EditProposal)
+            .where(EditProposal.idempotency_key == data.idempotency_key)
+            .options(selectinload(EditProposal.reviews))
+        )
+        if existing:
+            return existing
+
+    # Prevent the same agent from having two concurrent pending proposals for one page.
     if data.target_page_id:
         exists = await db.scalar(
             select(EditProposal.id).where(
@@ -45,6 +59,9 @@ async def create_proposal(db: AsyncSession, data: ProposalCreate) -> EditProposa
         rationale=data.rationale,
         proposer_agent_id=data.proposer_agent_id,
         status=ProposalStatus.pending,
+        idempotency_key=data.idempotency_key,
+        source_session_id=data.source_session_id,
+        batch_id=data.batch_id,
     )
     db.add(proposal)
     await db.flush()
@@ -55,7 +72,12 @@ async def create_proposal(db: AsyncSession, data: ProposalCreate) -> EditProposa
     event_bus.emit(
         Event(
             type=EventType.proposal_created,
-            payload={"proposal_id": proposal.id, "proposer": data.proposer_agent_id},
+            payload={
+                "proposal_id": proposal.id,
+                "proposer": data.proposer_agent_id,
+                "batch_id": data.batch_id,
+                "source_session_id": data.source_session_id,
+            },
         )
     )
     return proposal
@@ -77,6 +99,9 @@ async def list_proposals(
     *,
     page_id: str | None = None,
     status: ProposalStatus | None = None,
+    proposer_agent_id: str | None = None,
+    batch_id: str | None = None,
+    source_session_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[EditProposal]:
@@ -85,6 +110,12 @@ async def list_proposals(
         stmt = stmt.where(EditProposal.target_page_id == page_id)
     if status:
         stmt = stmt.where(EditProposal.status == status)
+    if proposer_agent_id:
+        stmt = stmt.where(EditProposal.proposer_agent_id == proposer_agent_id)
+    if batch_id:
+        stmt = stmt.where(EditProposal.batch_id == batch_id)
+    if source_session_id:
+        stmt = stmt.where(EditProposal.source_session_id == source_session_id)
     stmt = stmt.order_by(EditProposal.created_at.desc()).offset(offset).limit(limit)
     result = await db.scalars(stmt)
     return list(result.all())
@@ -139,7 +170,17 @@ async def review_proposal(db: AsyncSession, proposal_id: str, data: ReviewReques
 
 
 async def apply_proposal(db: AsyncSession, proposal_id: str, data: ApplyRequest) -> EditProposal:
-    proposal = await get_proposal(db, proposal_id)
+    # Use with_for_update() to serialize concurrent apply attempts at the DB level.
+    # The second executor that races on the same proposal will see status='applied'
+    # once the first commits, and will get an InvalidTransition error cleanly.
+    proposal = await db.scalar(
+        select(EditProposal)
+        .where(EditProposal.id == proposal_id)
+        .options(selectinload(EditProposal.reviews))
+        .with_for_update()
+    )
+    if proposal is None:
+        raise NotFound(f"Proposal '{proposal_id}' not found.")
 
     if proposal.status != ProposalStatus.approved:
         raise InvalidTransition(f"Proposal is '{proposal.status}', expected 'approved'.")
@@ -198,6 +239,8 @@ async def apply_proposal(db: AsyncSession, proposal_id: str, data: ApplyRequest)
                 "proposal_id": proposal.id,
                 "page_id": page.id,
                 "executor": data.executor_agent_id,
+                "batch_id": proposal.batch_id,
+                "source_session_id": proposal.source_session_id,
             },
         )
     )

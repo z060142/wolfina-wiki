@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +13,8 @@ from core.schemas.page import (
     PageVersionRead,
     RelationCreate,
     RelationRead,
+    SortField,
+    SortOrder,
 )
 from core.services import page_service, version_service
 
@@ -34,14 +38,39 @@ async def create_page(
 async def search_pages(
     q: str = Query(""),
     status: PageStatus | None = Query(None),
+    updated_after: datetime | None = Query(None, description="ISO-8601 datetime; return pages updated after this timestamp"),
+    sort_by: SortField = Query(SortField.updated_at),
+    sort_order: SortOrder = Query(SortOrder.desc),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     agent_id: str = Depends(get_current_agent),
 ) -> list[PageRead]:
-    params = PageSearchParams(q=q, status=status, limit=limit, offset=offset)
+    params = PageSearchParams(
+        q=q,
+        status=status,
+        updated_after=updated_after,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        limit=limit,
+        offset=offset,
+    )
     pages = await page_service.search_pages(db, params)
     return [PageRead.model_validate(p) for p in pages]
+
+
+# Must appear before /{page_id} to avoid being swallowed by the catch-all.
+@router.get("/by-slug/{slug}", response_model=PageRead)
+async def get_page_by_slug(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    agent_id: str = Depends(get_current_agent),
+) -> PageRead:
+    try:
+        page = await page_service.get_page_by_slug(db, slug)
+        return PageRead.model_validate(page)
+    except WikiError as exc:
+        raise map_wiki_error(exc) from exc
 
 
 @router.get("/{page_id}", response_model=PageRead)

@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,8 +68,22 @@ class RelationRead(BaseModel):
     created_by_agent: str
 
 
+class SortField(str, Enum):
+    updated_at = "updated_at"
+    created_at = "created_at"
+    title = "title"
+
+
+class SortOrder(str, Enum):
+    asc = "asc"
+    desc = "desc"
+
+
 class PageSearchParams(BaseModel):
     q: str = ""
     status: PageStatus | None = None
+    updated_after: datetime | None = None
+    sort_by: SortField = SortField.updated_at
+    sort_order: SortOrder = SortOrder.desc
     limit: int = Field(20, ge=1, le=200)
     offset: int = Field(0, ge=0)

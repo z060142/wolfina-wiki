@@ -44,8 +44,17 @@ class EditProposal(Base):
     proposed_canonical_facts: Mapped[str | None] = mapped_column(Text, nullable=True)
     proposed_source_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
-    proposer_agent_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    proposer_agent_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=ProposalStatus.pending)
+
+    # --- Traceability metadata ---
+    # Caller-supplied key for idempotent submission. Same key → return existing proposal.
+    idempotency_key: Mapped[str | None] = mapped_column(String(256), nullable=True, unique=True, index=True)
+    # Which agent session (conversation window) generated this proposal.
+    source_session_id: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    # Groups multiple proposals submitted together from one reasoning run.
+    batch_id: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

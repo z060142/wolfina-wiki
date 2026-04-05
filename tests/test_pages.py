@@ -1,5 +1,8 @@
 """Tests for page management endpoints and services."""
 
+from datetime import datetime, timezone
+from urllib.parse import quote
+
 import pytest
 from httpx import AsyncClient
 
@@ -52,6 +55,20 @@ async def test_get_page_not_found(client):
 
 
 @pytest.mark.asyncio
+async def test_get_page_by_slug(client):
+    await _create_page(client, slug="known-slug", title="Known")
+    resp = await client.get("/pages/by-slug/known-slug", headers=HEADERS)
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Known"
+
+
+@pytest.mark.asyncio
+async def test_get_page_by_slug_not_found(client):
+    resp = await client.get("/pages/by-slug/does-not-exist", headers=HEADERS)
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_archive_page(client):
     created = await _create_page(client)
     resp = await client.post(f"/pages/{created['id']}/archive", headers=HEADERS)
@@ -77,6 +94,27 @@ async def test_search_pages_empty_query_returns_all(client):
     resp = await client.get("/pages/search", headers=HEADERS)
     assert resp.status_code == 200
     assert len(resp.json()) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_sort_by_title_asc(client):
+    await _create_page(client, slug="z-page", title="Zebra")
+    await _create_page(client, slug="a-page", title="Apple")
+    resp = await client.get("/pages/search?sort_by=title&sort_order=asc", headers=HEADERS)
+    titles = [p["title"] for p in resp.json()]
+    assert titles == sorted(titles)
+
+
+@pytest.mark.asyncio
+async def test_search_updated_after_filter(client):
+    before = datetime.now(timezone.utc)
+    await _create_page(client, slug="new-page", title="New")
+
+    iso = quote(before.isoformat())
+    resp = await client.get(f"/pages/search?updated_after={iso}", headers=HEADERS)
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+    assert resp.json()[0]["slug"] == "new-page"
 
 
 @pytest.mark.asyncio
