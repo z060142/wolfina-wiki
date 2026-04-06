@@ -23,6 +23,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.db.base import AsyncSessionLocal
+from core.debug.event_stream import debug_stream
 from core.exceptions import Conflict, NotFound
 from core.models.conversation import ConversationMessage, ConversationWindow, WindowStatus
 from core.schemas.conversation import MessageAdd
@@ -37,6 +38,12 @@ async def create_window(db: AsyncSession, external_source_id: str = "") -> Conve
     window = ConversationWindow(external_source_id=external_source_id)
     db.add(window)
     await db.flush()
+    debug_stream.emit(
+        "window_created",
+        window_id=window.id,
+        external_source_id=external_source_id,
+        status=window.status,
+    )
     return window
 
 
@@ -107,6 +114,16 @@ async def add_message(
     await db.flush()
 
     should_flush = _check_flush_conditions(window)
+    debug_stream.emit(
+        "message_added",
+        window_id=window_id,
+        message_id=msg.id,
+        role=data.role,
+        char_count=char_count,
+        message_count=window.message_count,
+        total_char_count=window.total_char_count,
+        flush_triggered=should_flush,
+    )
     return msg, should_flush
 
 
@@ -118,7 +135,10 @@ def _check_flush_conditions(window: ConversationWindow) -> bool:
     if window.total_char_count >= settings.flush_max_chars:
         return True
     if window.first_message_at:
-        elapsed = (datetime.now(timezone.utc) - window.first_message_at).total_seconds()
+        first = window.first_message_at
+        if first.tzinfo is None:
+            first = first.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - first).total_seconds()
         if elapsed >= settings.flush_max_seconds:
             return True
     return False
@@ -194,6 +214,7 @@ async def _flush_background(window_id: str) -> None:
             batch_id = str(uuid.uuid4())
 
     logger.info("Flush started — window_id=%s batch_id=%s", window_id, batch_id)
+    debug_stream.emit("flush_started", window_id=window_id, batch_id=batch_id, message_count=len(messages))
 
     # Run the agent pipeline in its own transaction scope.
     async with AsyncSessionLocal() as pipeline_db:
@@ -222,6 +243,7 @@ async def _flush_background(window_id: str) -> None:
                 window.status = WindowStatus.cleared
 
     logger.info("Flush complete — window_id=%s batch_id=%s", window_id, batch_id)
+    debug_stream.emit("flush_completed", window_id=window_id, batch_id=batch_id)
 
     # Notify scheduler so it can update its dynamic interval.
     scheduler.record_flush()
