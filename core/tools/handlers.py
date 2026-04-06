@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.debug.event_stream import debug_stream
 from core.models.conversation import AgentTask, TaskStatus
 from core.schemas.page import PageSearchParams, RelationCreate, SortField, SortOrder
 from core.schemas.proposal import ApplyRequest, ProposalCreate, ReviewRequest
@@ -162,6 +163,9 @@ async def _propose_new_page(inp: dict, db: AsyncSession) -> dict:
         idempotency_key=inp.get("idempotency_key"),
     )
     proposal = await proposal_service.create_proposal(db, data)
+    debug_stream.emit("proposal_created", proposal_id=proposal.id,
+                      title=proposal.proposed_title, proposer=proposal.proposer_agent_id,
+                      batch_id=proposal.batch_id)
     return {"proposal": _proposal_out(proposal)}
 
 
@@ -179,6 +183,9 @@ async def _propose_page_edit(inp: dict, db: AsyncSession) -> dict:
         idempotency_key=inp.get("idempotency_key"),
     )
     proposal = await proposal_service.create_proposal(db, data)
+    debug_stream.emit("proposal_created", proposal_id=proposal.id,
+                      title=proposal.proposed_title, proposer=proposal.proposer_agent_id,
+                      batch_id=proposal.batch_id)
     return {"proposal": _proposal_out(proposal)}
 
 
@@ -190,12 +197,17 @@ async def _review_proposal(inp: dict, db: AsyncSession) -> dict:
         feedback=inp.get("feedback"),
     )
     proposal = await proposal_service.review_proposal(db, inp["proposal_id"], data)
+    debug_stream.emit("proposal_reviewed", proposal_id=proposal.id,
+                      decision=inp["decision"], reviewer=inp["reviewer_agent_id"],
+                      status=proposal.status)
     return {"proposal": _proposal_out(proposal)}
 
 
 async def _apply_proposal(inp: dict, db: AsyncSession) -> dict:
     data = ApplyRequest(executor_agent_id=inp["executor_agent_id"])
     proposal = await proposal_service.apply_proposal(db, inp["proposal_id"], data)
+    debug_stream.emit("proposal_applied", proposal_id=proposal.id,
+                      page_id=proposal.target_page_id, executor=inp["executor_agent_id"])
     return {"proposal": _proposal_out(proposal)}
 
 
@@ -227,6 +239,8 @@ async def _create_agent_task(inp: dict, db: AsyncSession) -> dict:
     )
     db.add(task)
     await db.flush()
+    debug_stream.emit("task_created", task_id=task.id, agent_type=task.agent_type,
+                      instruction=task.instruction[:100], batch_id=task.batch_id)
     return {"task": _task_out(task)}
 
 
@@ -256,6 +270,8 @@ async def _complete_agent_task(inp: dict, db: AsyncSession) -> dict:
     if outcome == "failed":
         task.error_message = inp.get("error_message", "")
     await db.flush()
+    debug_stream.emit("task_updated", task_id=task.id, agent_type=task.agent_type,
+                      status=task.status, outcome=outcome)
     return {"task": _task_out(task)}
 
 

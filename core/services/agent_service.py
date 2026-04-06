@@ -23,6 +23,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.debug.event_stream import debug_stream
 from core.services.llm_service import run_tool_loop
 from core.settings import settings
 from core.tools.definitions import get_tools_for_agent
@@ -134,14 +135,19 @@ async def _run_agent(
     agent_type: str,
     user_message: str,
     db: AsyncSession,
+    batch_id: str = "",
 ) -> str:
-    return await run_tool_loop(
+    debug_stream.emit("agent_start", agent_type=agent_type, batch_id=batch_id)
+    result = await run_tool_loop(
         agent_type=agent_type,
         system_prompt=_SYSTEM_PROMPTS[agent_type],
         user_message=user_message,
         tool_definitions=get_tools_for_agent(agent_type),
         db=db,
     )
+    debug_stream.emit("agent_done", agent_type=agent_type, batch_id=batch_id,
+                      result_preview=(result[:120] + "…") if len(result) > 120 else result)
+    return result
 
 
 _SYSTEM_PROMPTS: dict[str, str] = {
@@ -175,7 +181,7 @@ async def run_flush_pipeline(
         f"--- CONVERSATION ---\n{conversation_text}"
     )
     try:
-        await _run_agent("proposer", proposer_msg, db)
+        await _run_agent("proposer", proposer_msg, db, batch_id=batch_id)
         await db.commit()
         logger.info("Flush pipeline: proposer done — batch_id=%s", batch_id)
     except Exception:
@@ -190,7 +196,7 @@ async def run_flush_pipeline(
         f"Review all pending proposals in batch_id={batch_id}."
     )
     try:
-        await _run_agent("reviewer", reviewer_msg, db)
+        await _run_agent("reviewer", reviewer_msg, db, batch_id=batch_id)
         await db.commit()
         logger.info("Flush pipeline: reviewer done — batch_id=%s", batch_id)
     except Exception:
@@ -204,7 +210,7 @@ async def run_flush_pipeline(
         f"Apply all approved proposals in batch_id={batch_id}."
     )
     try:
-        await _run_agent("executor", executor_msg, db)
+        await _run_agent("executor", executor_msg, db, batch_id=batch_id)
         await db.commit()
         logger.info("Flush pipeline: executor done — batch_id=%s", batch_id)
     except Exception:
@@ -218,7 +224,7 @@ async def run_flush_pipeline(
         f"Add relations for pages created or updated in batch_id={batch_id}."
     )
     try:
-        await _run_agent("relation", relation_msg, db)
+        await _run_agent("relation", relation_msg, db, batch_id=batch_id)
         await db.commit()
         logger.info("Flush pipeline: relation done — batch_id=%s", batch_id)
     except Exception:
@@ -244,7 +250,7 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
         "Evaluate the current wiki state and create tasks for specialist agents as needed."
     )
     try:
-        await _run_agent("orchestrator", orch_msg, db)
+        await _run_agent("orchestrator", orch_msg, db, batch_id=batch_id)
         await db.commit()
     except Exception:
         logger.exception("Maintenance: orchestrator failed — batch_id=%s", batch_id)
@@ -261,7 +267,7 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
             "Mark each task done or failed when finished."
         )
         try:
-            await _run_agent(agent_type, specialist_msg, db)
+            await _run_agent(agent_type, specialist_msg, db, batch_id=batch_id)
             await db.commit()
             logger.info("Maintenance: %s done — batch_id=%s", agent_type, batch_id)
         except Exception:

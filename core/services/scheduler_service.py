@@ -115,6 +115,12 @@ class DynamicScheduler:
             self.flush_rate(),
             settings.scheduler_rate_window_hours,
         )
+        from core.debug.event_stream import debug_stream
+        debug_stream.emit(
+            "scheduler_tick",
+            flush_rate=self.flush_rate(),
+            current_interval=self._calculate_interval(),
+        )
         from core.services.agent_service import run_maintenance_pipeline
 
         async with AsyncSessionLocal() as db:
