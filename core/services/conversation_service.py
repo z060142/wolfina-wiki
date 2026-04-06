@@ -113,7 +113,9 @@ async def add_message(
     db.add(msg)
     await db.flush()
 
-    should_flush = _check_flush_conditions(window)
+    # Only flush after an assistant turn — flushing mid-exchange (on a user message)
+    # would capture an incomplete conversation and race with the LLM response write.
+    should_flush = data.role == "assistant" and _check_flush_conditions(window)
     debug_stream.emit(
         "message_added",
         window_id=window_id,
