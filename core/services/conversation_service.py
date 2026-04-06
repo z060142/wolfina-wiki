@@ -185,6 +185,7 @@ async def _flush_background(window_id: str) -> None:
     from core.services.agent_service import run_flush_pipeline
     from core.services.scheduler_service import scheduler
 
+    # Step 1: mark window as flushing (own session + transaction).
     async with AsyncSessionLocal() as db:
         async with db.begin():
             window = await db.scalar(
@@ -194,11 +195,11 @@ async def _flush_background(window_id: str) -> None:
             )
             if window is None or window.status != WindowStatus.active:
                 return
-
-            # Mark as flushing to prevent re-entrant flushes.
             window.status = WindowStatus.flushing
+        # session closes and commits here
 
-        # Re-open a fresh transaction for reading messages.
+    # Step 2: read unprocessed messages (own session).
+    async with AsyncSessionLocal() as db:
         async with db.begin():
             messages = await get_messages(db, window_id, include_processed=False)
             if not messages:
@@ -209,7 +210,6 @@ async def _flush_background(window_id: str) -> None:
                 if window:
                     window.status = WindowStatus.active
                 return
-
             conversation_text = _format_conversation(messages)
             batch_id = str(uuid.uuid4())
 

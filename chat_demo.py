@@ -154,13 +154,24 @@ class WikiClient:
         return r.json()
 
     def add_message(self, window_id: str, role: str, content: str) -> dict:
-        r = self._http.post(
-            f"{self._base}/conversations/windows/{window_id}/messages",
-            json={"role": role, "content": content},
-            headers=self._headers,
-        )
-        r.raise_for_status()
-        return r.json()
+        import time
+        for attempt in range(6):
+            r = self._http.post(
+                f"{self._base}/conversations/windows/{window_id}/messages",
+                json={"role": role, "content": content},
+                headers=self._headers,
+            )
+            if r.status_code == 409:
+                # Window is flushing — wait and retry
+                wait = 2 ** attempt
+                print(_color(f"[wiki] window flushing, retrying in {wait}s…", DIM))
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        # All retries exhausted — return a neutral response so the session continues
+        print(_color("[wiki] could not save message after retries (window still flushing)", YELLOW))
+        return {"flush_triggered": False}
 
     def flush(self, window_id: str) -> dict:
         r = self._http.post(

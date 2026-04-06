@@ -84,15 +84,18 @@ Your job is to enrich the wiki's knowledge graph by adding relations between pag
 
 For the newly created or updated pages in the current batch:
 1. Use list_pages or search_pages to find pages relevant to each new/updated page.
-2. Use get_related_pages to check what relations already exist.
-3. Use add_page_relation to add appropriate links.
+2. Use get_related_pages to check what relations already exist for each page BEFORE adding new ones.
+3. Use add_page_relation to add appropriate links only if they don't already exist.
 
 Relation types:
 - parent / child: for hierarchical topics (e.g. Python → Python Basics)
 - related_to: for semantically related topics at the same level
 - references: when one page cites or is derived from another
 
-Do not add redundant relations that already exist.
+IMPORTANT:
+- Always call get_related_pages first and skip any relation that already exists.
+- If add_page_relation returns {"error": "This relation already exists."}, skip it and move on — do NOT retry.
+- Stop when all relevant relations have been attempted; do not repeat the same calls.
 """
 
 _RESEARCH_PROMPT = """\
@@ -263,8 +266,11 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
         specialist_msg = (
             f"batch_id: {batch_id}\n"
             f"{agent_type}_agent_id: {agent_id}\n\n"
-            f"List your pending tasks for batch_id={batch_id} and execute each one. "
-            "Mark each task done or failed when finished."
+            f"Use list_agent_tasks with agent_type=\"{agent_type}\" and batch_id=\"{batch_id}\" "
+            f"to find your pending tasks. Execute each task using your tools "
+            f"(your agent id is \"{agent_id}\"). "
+            "Call complete_agent_task with outcome=\"done\" or \"failed\" for each task when finished. "
+            "If there are no tasks for you, do nothing."
         )
         try:
             await _run_agent(agent_type, specialist_msg, db, batch_id=batch_id)

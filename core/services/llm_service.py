@@ -241,13 +241,18 @@ async def run_tool_loop(
             break
 
         # ── tool call turn ────────────────────────────────────────────────────
-        # Append the assistant's tool-call message (Ollama / OpenAI format).
+        # Append the assistant's tool-call message.
+        # Ollama expects arguments as a dict; OpenAI-compat expects a JSON string.
+        is_ollama = settings.llm_provider != "openai_compat"
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": resp.text or ""}
         assistant_msg["tool_calls"] = [
             {
                 "id": tc.id,
                 "type": "function",
-                "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments if is_ollama else json.dumps(tc.arguments),
+                },
             }
             for tc in resp.tool_calls
         ]

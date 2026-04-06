@@ -191,9 +191,15 @@ async def _propose_page_edit(inp: dict, db: AsyncSession) -> dict:
 
 async def _review_proposal(inp: dict, db: AsyncSession) -> dict:
     from core.models.proposal import ReviewDecision
+    # Normalise common LLM mistakes: "approved"→"approve", "rejected"→"reject"
+    raw_decision = inp["decision"].strip().lower()
+    if raw_decision == "approved":
+        raw_decision = "approve"
+    elif raw_decision == "rejected":
+        raw_decision = "reject"
     data = ReviewRequest(
         reviewer_agent_id=inp["reviewer_agent_id"],
-        decision=ReviewDecision(inp["decision"]),
+        decision=ReviewDecision(raw_decision),
         feedback=inp.get("feedback"),
     )
     proposal = await proposal_service.review_proposal(db, inp["proposal_id"], data)
