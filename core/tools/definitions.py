@@ -2,7 +2,7 @@
 
 These are compatible with both the Ollama SDK and any OpenAI-compat API.
 
-16 tools — each has a distinct purpose with zero functional overlap:
+19 tools — each has a distinct purpose with zero functional overlap:
 
   Read-only (wiki):
     1. search_pages       — keyword search across title/content/summary
@@ -33,6 +33,9 @@ These are compatible with both the Ollama SDK and any OpenAI-compat API.
   Ingest pipeline:
    17. list_ingest_records  — query FileIngestRecord entries (status, path filter)
    18. complete_file_ingest — ingest agent writes summary + marks file done/failed
+
+  Subagent delegation:
+   19. spawn_subagents    — run up to 2 isolated read-only subagents in parallel
 """
 
 from __future__ import annotations
@@ -606,6 +609,63 @@ TOOLS: list[dict] = [
             },
         },
     },
+    # ── 19 ── spawn_subagents ─────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_subagents",
+            "description": (
+                "Spawn up to 2 isolated read-only subagents that run in parallel. "
+                "Each subagent receives its own instruction and optional context data, "
+                "executes independently (no shared state), and returns a text result. "
+                "Use this to parallelise research or information-gathering tasks that "
+                "do not require write access, saving context window and time. "
+                "Subagents can only use: search_pages, get_page, list_pages, "
+                "get_related_pages, get_page_history, read_file, list_files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "List of 1–2 tasks to run in parallel.",
+                        "minItems": 1,
+                        "maxItems": 2,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "A short caller-defined label to identify this task "
+                                        "in the results (e.g. 'check_python_page')."
+                                    ),
+                                },
+                                "instruction": {
+                                    "type": "string",
+                                    "description": (
+                                        "Full, self-contained instruction for the subagent. "
+                                        "Include everything the subagent needs — it has no "
+                                        "access to the parent agent's context."
+                                    ),
+                                },
+                                "context": {
+                                    "type": "string",
+                                    "description": (
+                                        "Optional extra data to pass to the subagent "
+                                        "(e.g. page IDs, search terms, file paths). "
+                                        "Will be appended to the instruction."
+                                    ),
+                                },
+                            },
+                            "required": ["task_id", "instruction"],
+                        },
+                    },
+                },
+                "required": ["tasks"],
+            },
+        },
+    },
     # ── 18 ── complete_file_ingest ────────────────────────────────────────────
     {
         "type": "function",
@@ -662,11 +722,13 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "get_related_pages", "get_page_history",
         "list_agent_tasks", "complete_agent_task",
         "read_file", "list_files",
+        "spawn_subagents",
     ],
     "proposer": [
         "search_pages", "get_page", "list_pages",
         "propose_new_page", "propose_page_edit",
         "list_agent_tasks", "complete_agent_task",
+        "spawn_subagents",
     ],
     "reviewer": [
         "search_pages", "get_page", "list_pages", "get_page_history",
@@ -687,6 +749,7 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "list_proposals", "list_agent_tasks",
         "create_agent_task",
         "list_files", "list_ingest_records",
+        "spawn_subagents",
     ],
     "ingest": [
         "list_agent_tasks", "complete_agent_task",
@@ -694,6 +757,7 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "list_ingest_records", "complete_file_ingest",
         "search_pages", "list_pages",
         "create_agent_task",
+        "spawn_subagents",
     ],
 }
 

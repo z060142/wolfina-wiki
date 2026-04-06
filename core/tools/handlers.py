@@ -474,6 +474,67 @@ async def _complete_file_ingest(inp: dict, db: AsyncSession) -> dict:
     }
 
 
+async def _spawn_subagents(inp: dict, db: AsyncSession) -> dict:
+    import asyncio
+
+    from core.db.base import AsyncSessionLocal
+    from core.services.llm_service import run_tool_loop
+    from core.tools.definitions import TOOL_MAP
+
+    _SUBAGENT_TOOLS = [
+        "search_pages", "get_page", "list_pages",
+        "get_related_pages", "get_page_history",
+        "read_file", "list_files",
+    ]
+    _SUBAGENT_TOOL_DEFS = [TOOL_MAP[n] for n in _SUBAGENT_TOOLS if n in TOOL_MAP]
+
+    _SUBAGENT_SYSTEM_PROMPT = """\
+You are a focused read-only research subagent. You have been given a single task.
+Use your available tools to gather the requested information, then produce a clear,
+structured answer. Do not attempt any write operations — you have no write tools.
+Complete your task efficiently and stop when done.
+"""
+
+    tasks = inp.get("tasks", [])
+    if not tasks:
+        return {"error": "No tasks provided."}
+    if len(tasks) > 2:
+        tasks = tasks[:2]  # Hard cap at 2
+
+    async def _run_one(task: dict) -> dict:
+        task_id = task.get("task_id", "task")
+        instruction = task.get("instruction", "")
+        context = task.get("context", "")
+        user_message = instruction
+        if context:
+            user_message = f"{instruction}\n\nAdditional context:\n{context}"
+
+        debug_stream.emit("subagent_start", task_id=task_id)
+        try:
+            async with AsyncSessionLocal() as sub_db:
+                result = await run_tool_loop(
+                    agent_type="subagent",
+                    system_prompt=_SUBAGENT_SYSTEM_PROMPT,
+                    user_message=user_message,
+                    tool_definitions=_SUBAGENT_TOOL_DEFS,
+                    db=sub_db,
+                    max_iterations=10,
+                )
+            debug_stream.emit(
+                "subagent_done",
+                task_id=task_id,
+                result_preview=(result[:120] + "…") if len(result) > 120 else result,
+            )
+            return {"task_id": task_id, "status": "done", "result": result}
+        except Exception as exc:
+            logger.warning("Subagent task %s failed: %s", task_id, exc)
+            debug_stream.emit("subagent_error", task_id=task_id, error=str(exc))
+            return {"task_id": task_id, "status": "failed", "error": str(exc)}
+
+    results = await asyncio.gather(*[_run_one(t) for t in tasks])
+    return {"subagent_results": list(results)}
+
+
 async def _list_files(inp: dict, db: AsyncSession) -> dict:
     raw_dirs = settings.file_read_allowed_dirs.strip()
     if not raw_dirs:
@@ -557,6 +618,7 @@ _HANDLERS: dict[str, Any] = {
     "list_files": _list_files,
     "list_ingest_records": _list_ingest_records,
     "complete_file_ingest": _complete_file_ingest,
+    "spawn_subagents": _spawn_subagents,
 }
 
 
