@@ -548,7 +548,11 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
     if not allowed_dirs:
         return {"error": "No valid allowed directories configured."}
 
-    pattern = inp.get("pattern", "**/*") or "**/*"
+    # Normalise pattern for rglob: strip leading "**/" so callers can pass either
+    # "*.md" or "**/*.md" and both recurse into subdirectories correctly.
+    raw_pattern = inp.get("pattern") or ""
+    import re as _re
+    rglob_pattern = _re.sub(r"^\*\*/", "", raw_pattern) if raw_pattern else "*"
     limit = min(max(1, int(inp.get("limit", 50))), 200)
 
     # Determine search roots
@@ -570,7 +574,7 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
         if not root.exists():
             continue
         try:
-            for p in sorted(root.glob(pattern)):
+            for p in sorted(root.rglob(rglob_pattern)):
                 if p in seen:
                     continue
                 seen.add(p)

@@ -558,9 +558,10 @@ TOOLS: list[dict] = [
                     "pattern": {
                         "type": "string",
                         "description": (
-                            "Glob pattern to match against. Examples: '**/*.md' (all Markdown files), "
-                            "'*.txt' (text files in root of each allowed dir), 'docs/**' (everything under docs/). "
-                            "Defaults to '**/*' (all files in all allowed directories)."
+                            "Glob pattern to match files. Search always recurses into subdirectories. "
+                            "Examples: '*.md' (all Markdown files), '*.txt' (all text files), "
+                            "'*.json' (all JSON files). The '**/' prefix is optional and ignored. "
+                            "Defaults to '*' (all files in all allowed directories and subdirectories)."
                         ),
                     },
                     "base_dir": {

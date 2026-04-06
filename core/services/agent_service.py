@@ -441,6 +441,7 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
 async def run_ingest_pipeline(
     db: AsyncSession,
     force_paths: list[str] | None = None,
+    scan_unprocessed: bool = False,
 ) -> None:
     """File ingest pipeline: scan → per-file ingest → cross-file synthesis → propose.
 
@@ -453,6 +454,9 @@ async def run_ingest_pipeline(
     Args:
         force_paths: If provided, these specific files are re-ingested regardless
                      of whether their content hash has changed (manual /ingest trigger).
+        scan_unprocessed: If True, also re-queue files that are currently pending or
+                          stuck in processing state (in addition to new/changed/failed).
+                          Used by the /ingest/scan command.
     """
     import json
     import uuid
@@ -510,7 +514,10 @@ async def run_ingest_pipeline(
             )
             changed = existing.content_hash != current_hash
             forced = abs_path in force_set
-            if changed or forced or existing.status == IngestStatus.failed:
+            stuck = scan_unprocessed and existing.status in (
+                IngestStatus.pending, IngestStatus.processing
+            )
+            if changed or forced or stuck or existing.status == IngestStatus.failed:
                 existing.content_hash = current_hash
                 existing.status = IngestStatus.pending
                 existing.summary = None
