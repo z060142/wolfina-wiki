@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import pathlib
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.debug.event_stream import debug_stream
+from core.settings import settings
 from core.models.conversation import AgentTask, TaskStatus
 from core.schemas.page import PageSearchParams, RelationCreate, SortField, SortOrder
 from core.schemas.proposal import ApplyRequest, ProposalCreate, ReviewRequest
@@ -281,6 +283,259 @@ async def _complete_agent_task(inp: dict, db: AsyncSession) -> dict:
     return {"task": _task_out(task)}
 
 
+def _resolve_allowed_path(raw_path: str, allowed_dirs: list[pathlib.Path]) -> pathlib.Path | None:
+    """Resolve a requested path and verify it falls inside an allowed directory.
+
+    Returns the resolved absolute Path, or None if access is denied.
+    """
+    requested = pathlib.Path(raw_path)
+    if requested.is_absolute():
+        resolved = requested.resolve()
+    else:
+        # Try CWD-relative first, then each allowed dir as base
+        resolved = None
+        candidates = [pathlib.Path.cwd() / requested] + [d / requested for d in allowed_dirs]
+        for candidate in candidates:
+            try:
+                r = candidate.resolve()
+                if r.exists():
+                    resolved = r
+                    break
+            except OSError:
+                continue
+        if resolved is None:
+            resolved = (pathlib.Path.cwd() / requested).resolve()
+
+    is_allowed = any(resolved == d or d in resolved.parents for d in allowed_dirs)
+    return resolved if is_allowed else None
+
+
+async def _read_file(inp: dict, db: AsyncSession) -> dict:
+    import re
+
+    # Parse allowed directories from settings
+    raw_dirs = settings.file_read_allowed_dirs.strip()
+    if not raw_dirs:
+        return {"error": "File read tool is disabled. Set FILE_READ_ALLOWED_DIRS in .env to enable it."}
+
+    allowed_dirs = [
+        pathlib.Path(d.strip()).resolve()
+        for d in raw_dirs.split(",")
+        if d.strip()
+    ]
+    if not allowed_dirs:
+        return {"error": "No valid allowed directories configured."}
+
+    resolved = _resolve_allowed_path(inp["path"], allowed_dirs)
+    if resolved is None:
+        allowed_display = ", ".join(str(d) for d in allowed_dirs)
+        return {"error": f"Access denied. Path is not within any allowed directory: {allowed_display}"}
+
+    if not resolved.exists():
+        return {"error": f"File not found: {resolved}"}
+    if not resolved.is_file():
+        return {"error": f"Path is not a file: {resolved}"}
+
+    encoding = inp.get("encoding", "utf-8")
+    try:
+        all_lines = resolved.read_text(encoding=encoding).splitlines()
+    except UnicodeDecodeError:
+        return {"error": f"Cannot decode file as {encoding}. It may be a binary file or use a different encoding."}
+
+    total_lines = len(all_lines)
+    size = resolved.stat().st_size
+
+    # ── Search mode ───────────────────────────────────────────────────────────
+    search_pattern = inp.get("search_pattern")
+    if search_pattern:
+        context_lines = max(0, int(inp.get("context_lines", 2)))
+        try:
+            pattern = re.compile(search_pattern, re.IGNORECASE)
+        except re.error as exc:
+            return {"error": f"Invalid regex pattern: {exc}"}
+
+        matches = []
+        included: set[int] = set()
+        for i, line in enumerate(all_lines):
+            if pattern.search(line):
+                start = max(0, i - context_lines)
+                end = min(total_lines - 1, i + context_lines)
+                for j in range(start, end + 1):
+                    if j not in included:
+                        included.add(j)
+                        matches.append({
+                            "line_number": j + 1,  # 1-based for human readability
+                            "text": all_lines[j],
+                            "is_match": j == i,
+                        })
+
+        debug_stream.emit("file_search", path=str(resolved), pattern=search_pattern, matches=len(matches))
+        return {
+            "path": str(resolved),
+            "total_lines": total_lines,
+            "search_pattern": search_pattern,
+            "match_count": sum(1 for m in matches if m["is_match"]),
+            "results": matches,
+        }
+
+    # ── Paginated read mode ───────────────────────────────────────────────────
+    offset = max(0, int(inp.get("offset_lines", 0)))
+    max_lines = min(max(1, int(inp.get("max_lines", 200))), 1000)
+
+    page_lines = all_lines[offset: offset + max_lines]
+    has_more = (offset + max_lines) < total_lines
+
+    # Byte-size guard on the returned chunk (not the whole file)
+    chunk = "\n".join(page_lines)
+    if len(chunk.encode(encoding, errors="replace")) > settings.file_read_max_bytes:
+        # Truncate to byte limit
+        chunk = chunk.encode(encoding, errors="replace")[: settings.file_read_max_bytes].decode(encoding, errors="replace")
+        has_more = True
+
+    debug_stream.emit("file_read", path=str(resolved), offset=offset, lines=len(page_lines), size=size)
+    return {
+        "path": str(resolved),
+        "total_lines": total_lines,
+        "offset_lines": offset,
+        "returned_lines": len(page_lines),
+        "has_more": has_more,
+        "content": chunk,
+    }
+
+
+async def _list_ingest_records(inp: dict, db: AsyncSession) -> dict:
+    from sqlalchemy import select
+    from core.models.ingest import FileIngestRecord
+
+    stmt = select(FileIngestRecord)
+    if inp.get("status"):
+        stmt = stmt.where(FileIngestRecord.status == inp["status"])
+    if inp.get("path_contains"):
+        stmt = stmt.where(FileIngestRecord.path.contains(inp["path_contains"]))
+    stmt = stmt.order_by(FileIngestRecord.last_scanned_at.desc()).limit(
+        min(int(inp.get("limit", 50)), 200)
+    )
+    result = await db.scalars(stmt)
+    records = list(result.all())
+    return {
+        "records": [
+            {
+                "id": r.id,
+                "path": r.path,
+                "status": r.status,
+                "summary": r.summary,
+                "related_page_ids": r.related_page_ids,
+                "content_hash": r.content_hash,
+                "last_scanned_at": r.last_scanned_at.isoformat() if r.last_scanned_at else None,
+                "last_processed_at": r.last_processed_at.isoformat() if r.last_processed_at else None,
+                "error_message": r.error_message,
+            }
+            for r in records
+        ]
+    }
+
+
+async def _complete_file_ingest(inp: dict, db: AsyncSession) -> dict:
+    import json as _json
+    from sqlalchemy import select
+    from core.models.ingest import FileIngestRecord, IngestStatus
+
+    record = await db.scalar(
+        select(FileIngestRecord).where(FileIngestRecord.id == inp["record_id"])
+    )
+    if record is None:
+        return {"error": f"FileIngestRecord '{inp['record_id']}' not found."}
+
+    outcome = inp["outcome"]
+    record.status = IngestStatus.done if outcome == "done" else IngestStatus.failed
+    record.last_processed_at = datetime.now(timezone.utc)
+
+    if inp.get("summary"):
+        record.summary = inp["summary"]
+    if inp.get("related_page_ids"):
+        record.related_page_ids = _json.dumps(inp["related_page_ids"])
+    if outcome == "failed":
+        record.error_message = inp.get("error_message", "")
+
+    await db.flush()
+    debug_stream.emit(
+        "file_ingest_complete",
+        record_id=record.id,
+        path=record.path,
+        outcome=outcome,
+    )
+    return {
+        "record": {
+            "id": record.id,
+            "path": record.path,
+            "status": record.status,
+            "summary": record.summary,
+        }
+    }
+
+
+async def _list_files(inp: dict, db: AsyncSession) -> dict:
+    raw_dirs = settings.file_read_allowed_dirs.strip()
+    if not raw_dirs:
+        return {"error": "File read tool is disabled. Set FILE_READ_ALLOWED_DIRS in .env to enable it."}
+
+    allowed_dirs = [
+        pathlib.Path(d.strip()).resolve()
+        for d in raw_dirs.split(",")
+        if d.strip()
+    ]
+    if not allowed_dirs:
+        return {"error": "No valid allowed directories configured."}
+
+    pattern = inp.get("pattern", "**/*") or "**/*"
+    limit = min(max(1, int(inp.get("limit", 50))), 200)
+
+    # Determine search roots
+    base_dir_raw = inp.get("base_dir")
+    if base_dir_raw:
+        search_root = _resolve_allowed_path(base_dir_raw, allowed_dirs)
+        if search_root is None:
+            allowed_display = ", ".join(str(d) for d in allowed_dirs)
+            return {"error": f"Access denied. base_dir is not within any allowed directory: {allowed_display}"}
+        if not search_root.is_dir():
+            return {"error": f"base_dir is not a directory: {search_root}"}
+        search_roots = [search_root]
+    else:
+        search_roots = allowed_dirs
+
+    found: list[dict] = []
+    seen: set[pathlib.Path] = set()
+    for root in search_roots:
+        if not root.exists():
+            continue
+        try:
+            for p in sorted(root.glob(pattern)):
+                if p in seen:
+                    continue
+                seen.add(p)
+                if p.is_file():
+                    found.append({
+                        "path": str(p),
+                        "relative_path": str(p.relative_to(root)),
+                        "size": p.stat().st_size,
+                        "base_dir": str(root),
+                    })
+                if len(found) >= limit:
+                    break
+        except Exception as exc:
+            logger.warning("list_files glob error in %s: %s", root, exc)
+        if len(found) >= limit:
+            break
+
+    debug_stream.emit("file_list", pattern=pattern, count=len(found))
+    return {
+        "pattern": pattern,
+        "count": len(found),
+        "truncated": len(found) >= limit,
+        "files": found,
+    }
+
+
 # ── dispatch table ────────────────────────────────────────────────────────────
 
 _HANDLERS: dict[str, Any] = {
@@ -298,6 +553,10 @@ _HANDLERS: dict[str, Any] = {
     "create_agent_task": _create_agent_task,
     "list_agent_tasks": _list_agent_tasks,
     "complete_agent_task": _complete_agent_task,
+    "read_file": _read_file,
+    "list_files": _list_files,
+    "list_ingest_records": _list_ingest_records,
+    "complete_file_ingest": _complete_file_ingest,
 }
 
 

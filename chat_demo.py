@@ -16,6 +16,9 @@ How it works:
 Type 'quit' or 'exit' to end the session.
 Type '/flush' to manually trigger a wiki flush right now.
 Type '/status' to show the current conversation window status.
+Type '/ingest' to trigger the file ingest pipeline (scans FILE_READ_ALLOWED_DIRS).
+Type '/ingest ./docs/foo.md,./notes/bar.md' to force re-ingest specific files.
+Type '/ingest-status' to show the current file ingest record status.
 """
 
 from __future__ import annotations
@@ -181,6 +184,23 @@ class WikiClient:
         r.raise_for_status()
         return r.json()
 
+    def trigger_ingest(self, force_paths: list[str] | None = None) -> dict:
+        if force_paths:
+            r = self._http.post(
+                f"{self._base}/ingest/force",
+                json={"paths": force_paths},
+                headers=self._headers,
+            )
+        else:
+            r = self._http.post(f"{self._base}/ingest", headers=self._headers)
+        r.raise_for_status()
+        return r.json()
+
+    def ingest_status(self) -> dict:
+        r = self._http.get(f"{self._base}/ingest/status", headers=self._headers)
+        r.raise_for_status()
+        return r.json()
+
     def get_window(self, window_id: str) -> dict:
         r = self._http.get(
             f"{self._base}/conversations/windows/{window_id}",
@@ -324,6 +344,25 @@ def run_chat(wiki_url: str, persona_path: str) -> None:
         if user_input.lower() == "/status":
             w = wiki.get_window(window_id)
             print_wiki_status(w, False)
+            continue
+
+        if user_input.lower().startswith("/ingest"):
+            parts = user_input.split(maxsplit=1)
+            force_paths = [p.strip() for p in parts[1].split(",")] if len(parts) > 1 else None
+            result = wiki.trigger_ingest(force_paths=force_paths)
+            print(_color(f"[wiki] {result['message']}", YELLOW))
+            if force_paths:
+                for p in (result.get("paths") or []):
+                    print(_color(f"  {p}", DIM))
+            continue
+
+        if user_input.lower() == "/ingest-status":
+            data = wiki.ingest_status()
+            print(_color(f"[ingest] {data['count']} record(s):", YELLOW))
+            for rec in data["records"][:20]:
+                print(_color(f"  [{rec['status']:10}] {rec['path']}", DIM))
+                if rec.get("summary"):
+                    print(_color(f"             {rec['summary'][:80]}", DIM))
             continue
 
         # Push user message to wiki

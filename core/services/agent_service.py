@@ -142,23 +142,84 @@ Steps:
 _ORCHESTRATOR_PROMPT = """\
 You are the Orchestrator agent for the Wolfina Wiki system.
 Your job is to evaluate the current state of the wiki and create a prioritised work queue
-for specialist agents (research, proposer, reviewer, executor, relation).
+for specialist agents (research, proposer, reviewer, executor, relation, ingest).
 
-Steps:
+== MAINTENANCE TASKS ==
 1. Use list_pages to review recently updated pages.
 2. Use list_proposals to check for stale pending/approved proposals.
 3. Use list_agent_tasks to see what is already queued.
-4. Create tasks using create_agent_task for work that needs to be done.
+4. Create maintenance tasks using create_agent_task as needed.
 
-Example tasks you might create:
+Example maintenance tasks:
 - Ask research agent to summarise orphaned pages
 - Ask proposer agent to merge near-duplicate pages
 - Ask reviewer agent to review long-pending proposals
 - Ask executor agent to apply all approved proposals
 - Ask relation agent to link recently created pages
 
-Be specific in the instruction for each task — include page IDs or search terms as context_json.
+== INGEST PLANNING (Round 1 — per-file scanning) ==
+When the mode includes ingest work:
+1. Use list_files to discover all files in the allowed directories.
+2. Use list_ingest_records to see known files and their hashes/summaries.
+3. For files that are NEW (not in records) or CHANGED (hash mismatch — hash is in context_json):
+   - Create an ingest task: agent_type="ingest", instruction describes the file to process.
+   - Include {"path": "<absolute_path>", "record_id": "<id_if_existing>"} in context_json.
+4. Do NOT create ingest tasks for files already status=done with an unchanged hash.
+
+== INGEST PLANNING (Round 2 — cross-file synthesis) ==
+When all pending ingest tasks are done:
+1. Use list_ingest_records with status="done" to read all file summaries.
+2. Use list_pages to see current wiki state.
+3. Decide how to group files into wiki pages (many-to-many is fine).
+4. Create proposer tasks with instructions referencing specific record IDs and target page strategy.
+   Include relevant record_ids in context_json so the ingest agent can re-read summaries.
+
+Be specific in every task instruction — include record IDs, page IDs, or file paths in context_json.
 Do not create duplicate tasks if equivalent ones are already pending.
+"""
+
+_INGEST_PROMPT = """\
+You are the Ingest agent for the Wolfina Wiki system.
+Your job is to read external files, extract and synthesise knowledge from them,
+and prepare structured content for the proposer agent to turn into wiki pages.
+
+You operate in two modes depending on your task:
+
+== ROUND 1 MODE (per-file processing) ==
+You receive a task with a specific file path to process.
+
+1. Use list_agent_tasks to find your pending task and extract the file path from context_json.
+2. Use read_file to read the file. For large files, use pagination (offset_lines + max_lines)
+   or search_pattern to locate relevant sections — do NOT try to read everything at once.
+3. If the file references other already-processed files that are relevant, use list_ingest_records
+   to find their summaries (status="done") — you can use these as background context without
+   re-reading the raw files.
+4. Produce a concise summary of what the file contains: key topics, facts, structure.
+5. Call complete_file_ingest with:
+   - record_id from context_json
+   - outcome="done"
+   - summary: your concise description of the file's content (this is what the orchestrator
+     will use for cross-file planning — make it informative but compact)
+   - related_page_ids: [] (leave empty in Round 1; populated by the proposer later)
+6. Call complete_agent_task with outcome="done".
+
+== ROUND 2 MODE (cross-file synthesis) ==
+You receive a task asking you to synthesise content from multiple files into wiki page proposals.
+
+1. Use list_agent_tasks to find your pending task. The context_json will list record_ids and
+   a target page strategy.
+2. Use list_ingest_records to read summaries for all relevant records.
+3. Use read_file on the actual files as needed to get full detail.
+4. Use search_pages / list_pages to check if target pages already exist.
+5. Use create_agent_task to create proposer tasks with the synthesised content.
+   Pass the full proposed content, title, rationale, and source file paths in context_json.
+6. Call complete_agent_task with outcome="done".
+
+Guidelines:
+- A single file may contribute to multiple wiki pages; multiple files may merge into one page.
+- Be faithful to the source material. Do not invent information.
+- In the summary, capture WHAT the file is about (not HOW you read it).
+- If a file is binary, encrypted, or unreadable, mark it failed with a clear error_message.
 """
 
 
@@ -190,6 +251,7 @@ _SYSTEM_PROMPTS: dict[str, str] = {
     "relation": _RELATION_PROMPT,
     "research": _RESEARCH_PROMPT,
     "orchestrator": _ORCHESTRATOR_PROMPT,
+    "ingest": _INGEST_PROMPT,
 }
 
 
@@ -325,3 +387,196 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
             await db.rollback()
 
     logger.info("Maintenance pipeline complete — batch_id=%s", batch_id)
+
+
+async def run_ingest_pipeline(
+    db: AsyncSession,
+    force_paths: list[str] | None = None,
+) -> None:
+    """File ingest pipeline: scan → per-file ingest → cross-file synthesis → propose.
+
+    Two-round design (Plan B):
+      Round 1 — Orchestrator scans files, creates ingest tasks per new/changed file.
+                Ingest agents read each file and write summaries.
+      Round 2 — Orchestrator reads all summaries, does cross-file planning,
+                creates proposer tasks. Proposer generates wiki proposals.
+
+    Args:
+        force_paths: If provided, these specific files are re-ingested regardless
+                     of whether their content hash has changed (manual /ingest trigger).
+    """
+    import json
+    import uuid
+
+    from core.models.ingest import FileIngestRecord, IngestStatus, compute_file_hash
+    from core.settings import settings
+    from sqlalchemy import select
+
+    batch_id = str(uuid.uuid4())
+    logger.info("Ingest pipeline start — batch_id=%s force=%s", batch_id, force_paths)
+    debug_stream.emit("ingest_pipeline_start", batch_id=batch_id, force_paths=force_paths)
+
+    # ── Pre-scan: upsert FileIngestRecord for all allowed files ───────────────
+    raw_dirs = settings.file_read_allowed_dirs.strip()
+    if not raw_dirs:
+        logger.warning("Ingest pipeline: FILE_READ_ALLOWED_DIRS not set — nothing to ingest.")
+        return
+
+    import pathlib
+    allowed_dirs = [
+        pathlib.Path(d.strip()).resolve()
+        for d in raw_dirs.split(",")
+        if d.strip()
+    ]
+
+    # Collect all files under allowed dirs
+    all_files: list[pathlib.Path] = []
+    for root in allowed_dirs:
+        if root.exists() and root.is_dir():
+            all_files.extend(p for p in root.rglob("*") if p.is_file())
+
+    # Upsert records and identify which need processing
+    needs_processing: list[FileIngestRecord] = []
+    force_set = set(str(pathlib.Path(p).resolve()) for p in (force_paths or []))
+
+    for file_path in all_files:
+        abs_path = str(file_path)
+        try:
+            current_hash = compute_file_hash(abs_path)
+        except OSError as exc:
+            logger.warning("Ingest: cannot hash %s: %s", abs_path, exc)
+            continue
+
+        existing = await db.scalar(
+            select(FileIngestRecord).where(FileIngestRecord.path == abs_path)
+        )
+        if existing is None:
+            record = FileIngestRecord(path=abs_path, content_hash=current_hash)
+            db.add(record)
+            await db.flush()
+            needs_processing.append(record)
+        else:
+            existing.last_scanned_at = __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            )
+            changed = existing.content_hash != current_hash
+            forced = abs_path in force_set
+            if changed or forced or existing.status == IngestStatus.failed:
+                existing.content_hash = current_hash
+                existing.status = IngestStatus.pending
+                existing.summary = None
+                existing.error_message = None
+                await db.flush()
+                needs_processing.append(existing)
+
+    await db.commit()
+
+    if not needs_processing:
+        logger.info("Ingest pipeline: no new or changed files — skipping Round 1.")
+    else:
+        # ── Round 1: orchestrator plans per-file ingest tasks ─────────────────
+        file_list_summary = "\n".join(
+            f"  - record_id={r.id} path={r.path}" for r in needs_processing
+        )
+        orch_msg = (
+            f"batch_id: {batch_id}\n\n"
+            "INGEST ROUND 1: Create one ingest task per file listed below.\n"
+            "For each file, set agent_type='ingest', and include "
+            '{"record_id": "<id>", "path": "<path>"} in context_json.\n\n'
+            f"Files to process:\n{file_list_summary}"
+        )
+        try:
+            await _run_agent("orchestrator", orch_msg, db, batch_id=batch_id)
+            await db.commit()
+        except Exception:
+            logger.exception("Ingest Round 1: orchestrator failed — batch_id=%s", batch_id)
+            await db.rollback()
+            return
+
+        # Mark files as processing
+        for record in needs_processing:
+            record.status = IngestStatus.processing
+        await db.commit()
+
+        # Run ingest agents
+        ingest_agent_id = settings.ingest_agent_id
+        ingest_msg = (
+            f"batch_id: {batch_id}\n"
+            f"ingest_agent_id: {ingest_agent_id}\n\n"
+            f"Use list_agent_tasks with agent_type=\"ingest\" and batch_id=\"{batch_id}\" "
+            "to find your pending tasks. For each task, read the file specified in context_json, "
+            "extract a summary, and call complete_file_ingest then complete_agent_task."
+        )
+        try:
+            await _run_agent("ingest", ingest_msg, db, batch_id=batch_id)
+            await db.commit()
+            logger.info("Ingest Round 1: ingest agent done — batch_id=%s", batch_id)
+        except Exception:
+            logger.exception("Ingest Round 1: ingest agent failed — batch_id=%s", batch_id)
+            await db.rollback()
+
+    # ── Round 2: orchestrator reads all summaries, creates proposer tasks ──────
+    done_records = await db.scalars(
+        select(FileIngestRecord).where(FileIngestRecord.status == IngestStatus.done)
+    )
+    done_list = list(done_records.all())
+    if not done_list:
+        logger.info("Ingest pipeline: no done records — skipping Round 2.")
+        debug_stream.emit("ingest_pipeline_complete", batch_id=batch_id, proposed=0)
+        return
+
+    summaries = "\n".join(
+        f"  record_id={r.id} path={r.path}\n  summary={r.summary or '(none)'}"
+        for r in done_list
+    )
+    orch_round2_msg = (
+        f"batch_id: {batch_id}\n\n"
+        "INGEST ROUND 2: Cross-file synthesis.\n"
+        "Below are all processed files with their summaries. "
+        "Use list_pages to check the current wiki state, then decide how to group these "
+        "files into wiki pages (many-to-many). Create proposer tasks with detailed instructions "
+        "including the relevant record_ids and proposed page structure.\n\n"
+        f"Processed files:\n{summaries}"
+    )
+    try:
+        await _run_agent("orchestrator", orch_round2_msg, db, batch_id=batch_id)
+        await db.commit()
+    except Exception:
+        logger.exception("Ingest Round 2: orchestrator failed — batch_id=%s", batch_id)
+        await db.rollback()
+        return
+
+    # Run proposer, reviewer, executor for ingest-generated proposals
+    for agent_type in ("proposer", "reviewer", "executor"):
+        agent_id = getattr(settings, f"{agent_type}_agent_id")
+        _extra_ingest = {
+            "reviewer": (
+                'Also use list_proposals with status="pending" (no batch_id filter) '
+                "to find any proposals awaiting review, and review them."
+            ),
+            "executor": (
+                'Also use list_proposals with status="approved" (no batch_id filter) '
+                "to find any approved proposals, and apply them."
+            ),
+        }
+        extra = _extra_ingest.get(agent_type, "")
+        specialist_msg = (
+            f"batch_id: {batch_id}\n"
+            f"{agent_type}_agent_id: {agent_id}\n\n"
+            f'Use list_agent_tasks with agent_type="{agent_type}" and batch_id="{batch_id}" '
+            f'to find your pending tasks. Execute each task '
+            f'(your agent id is "{agent_id}"). '
+            + (f"{extra} " if extra else "")
+            + 'Call complete_agent_task with outcome="done" or "failed" for each task. '
+            "If there are no tasks for you, do nothing."
+        )
+        try:
+            await _run_agent(agent_type, specialist_msg, db, batch_id=batch_id)
+            await db.commit()
+            logger.info("Ingest Round 2: %s done — batch_id=%s", agent_type, batch_id)
+        except Exception:
+            logger.exception("Ingest Round 2: %s failed — batch_id=%s", agent_type, batch_id)
+            await db.rollback()
+
+    debug_stream.emit("ingest_pipeline_complete", batch_id=batch_id)
+    logger.info("Ingest pipeline complete — batch_id=%s", batch_id)

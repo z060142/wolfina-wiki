@@ -2,7 +2,7 @@
 
 These are compatible with both the Ollama SDK and any OpenAI-compat API.
 
-14 tools — each has a distinct purpose with zero functional overlap:
+16 tools — each has a distinct purpose with zero functional overlap:
 
   Read-only (wiki):
     1. search_pages       — keyword search across title/content/summary
@@ -25,6 +25,14 @@ These are compatible with both the Ollama SDK and any OpenAI-compat API.
    12. create_agent_task  — orchestrator creates a work item for a specialist
    13. list_agent_tasks   — list tasks filtered by status / agent_type
    14. complete_agent_task — specialist marks its own task done or failed
+
+  File system (read-only, restricted):
+   15. read_file          — read a file from an allowed directory (with pagination and regex search)
+   16. list_files         — list/search files by glob pattern within allowed directories
+
+  Ingest pipeline:
+   17. list_ingest_records  — query FileIngestRecord entries (status, path filter)
+   18. complete_file_ingest — ingest agent writes summary + marks file done/failed
 """
 
 from __future__ import annotations
@@ -471,6 +479,177 @@ TOOLS: list[dict] = [
             },
         },
     },
+    # ── 15 ── read_file ───────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read the text content of a file from the filesystem. "
+                "Only files within the administrator-configured allowed directories can be accessed. "
+                "Supports line-based pagination for large files and regex search within the file. "
+                "Use this to read reference documents, configuration files, or source material "
+                "that should inform wiki content. Binary files are not supported.\n\n"
+                "Workflow for large files:\n"
+                "  1. Call without offset_lines/max_lines to get the first page and see total_lines.\n"
+                "  2. If has_more is true, call again with offset_lines to read subsequent pages.\n"
+                "  3. Alternatively, use search_pattern to find specific sections without reading everything."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Path to the file. Can be absolute or relative. "
+                            "Relative paths are resolved from the process working directory or the allowed directories. "
+                            "Must resolve to a location inside an allowed directory."
+                        ),
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "description": "Text encoding. Defaults to 'utf-8'. Use 'utf-8-sig' for UTF-8-BOM files.",
+                    },
+                    "offset_lines": {
+                        "type": "integer",
+                        "description": "0-based line number to start reading from. Default 0 (beginning of file).",
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to return per call. Default 200, max 1000.",
+                    },
+                    "search_pattern": {
+                        "type": "string",
+                        "description": (
+                            "Optional regex pattern to search within the file. "
+                            "When provided, only matching lines are returned (with line numbers and context). "
+                            "offset_lines and max_lines are ignored when this is set."
+                        ),
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": (
+                            "Number of lines before and after each search match to include as context. "
+                            "Only used with search_pattern. Default 2."
+                        ),
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    # ── 16 ── list_files ──────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": (
+                "List or search for files within the allowed directories. "
+                "Supports glob patterns (e.g. '**/*.md', 'docs/*.txt') to find files by name or extension. "
+                "Use this before read_file when you need to discover what files are available. "
+                "Only files within the administrator-configured allowed directories are returned."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": (
+                            "Glob pattern to match against. Examples: '**/*.md' (all Markdown files), "
+                            "'*.txt' (text files in root of each allowed dir), 'docs/**' (everything under docs/). "
+                            "Defaults to '**/*' (all files in all allowed directories)."
+                        ),
+                    },
+                    "base_dir": {
+                        "type": "string",
+                        "description": (
+                            "Optional subdirectory within an allowed directory to search in. "
+                            "Narrows the search scope. Must resolve inside an allowed directory."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results. Default 50, max 200.",
+                    },
+                },
+            },
+        },
+    },
+    # ── 17 ── list_ingest_records ─────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "list_ingest_records",
+            "description": (
+                "Query the file ingest tracking records. "
+                "Use this to see which files have been processed, which are pending, "
+                "and to read per-file summaries for cross-file planning. "
+                "The orchestrator uses this to plan wiki page groupings across multiple files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "processing", "done", "failed"],
+                        "description": "Filter by processing status. Omit to return all.",
+                    },
+                    "path_contains": {
+                        "type": "string",
+                        "description": "Optional substring filter on the file path.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results. Default 50.",
+                    },
+                },
+            },
+        },
+    },
+    # ── 18 ── complete_file_ingest ────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_file_ingest",
+            "description": (
+                "Called by the ingest agent after processing a file. "
+                "Writes a content summary (for future cross-file orchestration), "
+                "records which wiki pages were created/updated from this file, "
+                "and marks the record as done or failed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "description": "UUID of the FileIngestRecord to update.",
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["done", "failed"],
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": (
+                            "A concise description of what this file contains "
+                            "(topics, key facts, structure). Used by the orchestrator "
+                            "for future cross-file planning without re-reading the raw file."
+                        ),
+                    },
+                    "related_page_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "UUIDs of wiki pages that were proposed or updated from this file.",
+                    },
+                    "error_message": {
+                        "type": "string",
+                        "description": "Required when outcome is 'failed'. Describes what went wrong.",
+                    },
+                },
+                "required": ["record_id", "outcome"],
+            },
+        },
+    },
 ]
 
 # Mapping from tool name → definition (for quick lookup)
@@ -482,6 +661,7 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "search_pages", "get_page", "list_pages",
         "get_related_pages", "get_page_history",
         "list_agent_tasks", "complete_agent_task",
+        "read_file", "list_files",
     ],
     "proposer": [
         "search_pages", "get_page", "list_pages",
@@ -505,6 +685,14 @@ AGENT_TOOLS: dict[str, list[str]] = {
     "orchestrator": [
         "search_pages", "get_page", "list_pages",
         "list_proposals", "list_agent_tasks",
+        "create_agent_task",
+        "list_files", "list_ingest_records",
+    ],
+    "ingest": [
+        "list_agent_tasks", "complete_agent_task",
+        "list_files", "read_file",
+        "list_ingest_records", "complete_file_ingest",
+        "search_pages", "list_pages",
         "create_agent_task",
     ],
 }

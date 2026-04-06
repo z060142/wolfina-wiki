@@ -70,6 +70,7 @@ def create_app() -> FastAPI:
     from api.routers.proposals import router as proposals_router
     from api.routers.conversations import router as conversations_router
     from api.routers.debug import router as debug_router
+    from api.routers.ingest import router as ingest_router
 
     app.include_router(pages_router)
     app.include_router(proposals_router)
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(events_router)
     app.include_router(conversations_router)
     app.include_router(debug_router)
+    app.include_router(ingest_router)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict:
