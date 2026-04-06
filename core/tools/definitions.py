@@ -481,26 +481,26 @@ AGENT_TOOLS: dict[str, list[str]] = {
     "research": [
         "search_pages", "get_page", "list_pages",
         "get_related_pages", "get_page_history",
-        "complete_agent_task",
+        "list_agent_tasks", "complete_agent_task",
     ],
     "proposer": [
         "search_pages", "get_page", "list_pages",
         "propose_new_page", "propose_page_edit",
-        "complete_agent_task",
+        "list_agent_tasks", "complete_agent_task",
     ],
     "reviewer": [
-        "get_page", "list_pages", "get_page_history",
+        "search_pages", "get_page", "list_pages", "get_page_history",
         "list_proposals", "review_proposal",
-        "complete_agent_task",
+        "list_agent_tasks", "complete_agent_task",
     ],
     "executor": [
         "list_proposals", "apply_proposal",
-        "complete_agent_task",
+        "list_agent_tasks", "complete_agent_task",
     ],
     "relation": [
-        "get_page", "list_pages", "get_related_pages",
+        "get_page", "list_pages", "search_pages", "get_related_pages",
         "add_page_relation",
-        "complete_agent_task",
+        "list_agent_tasks", "complete_agent_task",
     ],
     "orchestrator": [
         "search_pages", "get_page", "list_pages",

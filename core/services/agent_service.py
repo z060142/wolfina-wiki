@@ -261,15 +261,29 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
         return
 
     # 2. Run each specialist against its pending tasks in this batch
+    # Note: reviewer and executor also handle any globally pending/approved proposals
+    # (maintenance proposer proposals do not carry the maintenance batch_id).
+    _extra: dict[str, str] = {
+        "reviewer": (
+            "Also use list_proposals with status=\"pending\" (no batch_id filter) "
+            "to find any proposals awaiting review, and review them."
+        ),
+        "executor": (
+            "Also use list_proposals with status=\"approved\" (no batch_id filter) "
+            "to find any approved proposals, and apply them."
+        ),
+    }
     for agent_type in ("research", "proposer", "reviewer", "executor", "relation"):
         agent_id = getattr(settings, f"{agent_type}_agent_id")
+        extra = _extra.get(agent_type, "")
         specialist_msg = (
             f"batch_id: {batch_id}\n"
             f"{agent_type}_agent_id: {agent_id}\n\n"
             f"Use list_agent_tasks with agent_type=\"{agent_type}\" and batch_id=\"{batch_id}\" "
             f"to find your pending tasks. Execute each task using your tools "
             f"(your agent id is \"{agent_id}\"). "
-            "Call complete_agent_task with outcome=\"done\" or \"failed\" for each task when finished. "
+            + (f"{extra} " if extra else "")
+            + "Call complete_agent_task with outcome=\"done\" or \"failed\" for each task when finished. "
             "If there are no tasks for you, do nothing."
         )
         try:
