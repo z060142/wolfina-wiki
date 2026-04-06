@@ -20,7 +20,14 @@ async def lifespan(app: FastAPI):
     import_models()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Start the background maintenance scheduler.
+    from core.services.scheduler_service import scheduler
+    scheduler.start()
+
     yield
+
+    await scheduler.stop()
     await engine.dispose()
 
 
@@ -28,7 +35,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Wolfina Wiki",
         description="LLM-native knowledge system with multi-Agent governance and plugin layer.",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
 
@@ -61,15 +68,24 @@ def create_app() -> FastAPI:
     from api.routers.pages import router as pages_router
     from api.routers.plugins import events_router, router as plugins_router
     from api.routers.proposals import router as proposals_router
+    from api.routers.conversations import router as conversations_router
 
     app.include_router(pages_router)
     app.include_router(proposals_router)
     app.include_router(plugins_router)
     app.include_router(events_router)
+    app.include_router(conversations_router)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict:
-        return {"status": "ok"}
+        from core.services.scheduler_service import scheduler
+        return {
+            "status": "ok",
+            "scheduler": {
+                "flush_rate": scheduler.flush_rate(),
+                "current_interval_seconds": scheduler.current_interval(),
+            },
+        }
 
     return app
 
