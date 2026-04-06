@@ -223,6 +223,15 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .ev-task_updated .badge{background:#0c1408;color:#60a030}
 .ev-scheduler_tick .badge{background:#0a0a1c;color:#6060c0}
 .ev-connected .badge{background:#061006;color:var(--green)}
+.ev-subagent_start .badge{background:#08101e;color:var(--blue)}
+.ev-subagent_done .badge{background:#061208;color:var(--green)}
+.ev-subagent_error .badge{background:#180606;color:var(--red)}
+.ev-ingest_pipeline_start .badge{background:#101808;color:#80c040}
+.ev-ingest_pipeline_complete .badge{background:#061408;color:var(--teal)}
+.ev-file_ingest_complete .badge{background:#061208;color:#60c070}
+.ev-file_read .badge{background:#0a0a1c;color:#6060c0}
+.ev-file_search .badge{background:#0a0a1c;color:#7070d0}
+.ev-file_list .badge{background:#0a0a1c;color:#5050b0}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes glow-amber{from{box-shadow:0 0 4px #f0a03060}to{box-shadow:0 0 10px #f0a03099}}
 #empty-msg{color:var(--dim);font-size:11px;padding:8px 0}
@@ -261,7 +270,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 </div>
 
 <script>
-const AGENT_TYPES = ['orchestrator','research','proposer','reviewer','executor','relation'];
+const AGENT_TYPES = ['orchestrator','research','proposer','reviewer','executor','relation','ingest','subagent'];
 const MAX_TIMELINE = 200;
 const MAX_PROPOSALS = 12;
 const MAX_TASKS = 15;
@@ -410,6 +419,15 @@ function buildDetail(ev) {
     case 'agent_tool_result': return `${ev.agent_type} ← ${ev.tool}  ${ev.ok?'ok':'ERROR'} ${(ev.result_preview||'').slice(0,60)}`;
     case 'agent_done': return `${ev.agent_type} batch=${shortBatch(ev.batch_id)} "${(ev.result_preview||'').slice(0,60)}"`;
     case 'agent_error': return `${ev.agent_type} iter=${ev.iteration}`;
+    case 'subagent_start': return `task=${ev.task_id}`;
+    case 'subagent_done': return `task=${ev.task_id} "${(ev.result_preview||'').slice(0,80)}"`;
+    case 'subagent_error': return `task=${ev.task_id} ${ev.error||''}`;
+    case 'ingest_pipeline_start': return `batch=${shortBatch(ev.batch_id)} force=${JSON.stringify(ev.force_paths||null)}`;
+    case 'ingest_pipeline_complete': return `batch=${shortBatch(ev.batch_id)} proposed=${ev.proposed??''}`;
+    case 'file_ingest_complete': return `record=${ev.record_id} outcome=${ev.outcome||''}`;
+    case 'file_read': return `${ev.path} lines=${ev.lines} offset=${ev.offset}`;
+    case 'file_search': return `${ev.path} pattern=${ev.pattern} matches=${ev.matches}`;
+    case 'file_list': return `pattern=${ev.pattern} count=${ev.count}`;
     case 'proposal_created': return `[${shortId(ev.proposal_id)}] "${ev.title||''}" by ${shortId(ev.proposer||ev.proposer_agent_id)} batch=${shortBatch(ev.batch_id)}`;
     case 'proposal_reviewed': return `[${shortId(ev.proposal_id)}] ${ev.decision} by ${shortId(ev.reviewer)} → ${ev.status}`;
     case 'proposal_applied': return `[${shortId(ev.proposal_id)}] → page=${shortId(ev.page_id)} by ${shortId(ev.executor)}`;
@@ -495,6 +513,25 @@ function handleEvent(ev) {
       state.agents[ev.agent_type].status = 'error';
       state.agents[ev.agent_type].action = 'error';
     }
+    renderAgents(); return;
+  }
+  if (t === 'subagent_start') {
+    state.agents['subagent'] = { status: 'thinking', action: `task: ${ev.task_id}`, args: '', iter: 0, batch_id: '' };
+    renderAgents(); return;
+  }
+  if (t === 'subagent_done') {
+    state.agents['subagent'] = { status: 'done', action: `done: ${(ev.result_preview||'').slice(0,60)}`, args: '', iter: 0, batch_id: '' };
+    renderAgents();
+    setTimeout(() => {
+      if (state.agents['subagent'] && state.agents['subagent'].status === 'done') {
+        state.agents['subagent'] = { status: 'idle', action: '', args: '', iter: 0, batch_id: '' };
+        renderAgents();
+      }
+    }, 4000);
+    return;
+  }
+  if (t === 'subagent_error') {
+    state.agents['subagent'] = { status: 'error', action: `error: ${(ev.error||'').slice(0,60)}`, args: '', iter: 0, batch_id: '' };
     renderAgents(); return;
   }
   if (t === 'proposal_created') {
