@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     relation_agent_id: str = "wiki-relation"
     orchestrator_agent_id: str = "wiki-orchestrator"
     ingest_agent_id: str = "wiki-ingest"
+    director_agent_id: str = "wiki-director"
+
+    # ── Per-agent model overrides (continued) ─────────────────────────────────
+    director_agent_model: str = ""
 
     # ── Conversation flush thresholds ─────────────────────────────────────────
     flush_max_messages: int = 50         # flush after N messages

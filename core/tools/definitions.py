@@ -2,7 +2,7 @@
 
 These are compatible with both the Ollama SDK and any OpenAI-compat API.
 
-19 tools — each has a distinct purpose with zero functional overlap:
+21 tools — each has a distinct purpose with zero functional overlap:
 
   Read-only (wiki):
     1. search_pages       — keyword search across title/content/summary
@@ -36,6 +36,10 @@ These are compatible with both the Ollama SDK and any OpenAI-compat API.
 
   Subagent delegation:
    19. spawn_subagents    — run up to 2 isolated read-only subagents in parallel
+
+  Director-only:
+   20. trigger_pipeline   — fire off a background pipeline (maintenance/ingest)
+   21. manage_todo        — manage the director's personal todo list
 """
 
 from __future__ import annotations
@@ -667,6 +671,67 @@ TOOLS: list[dict] = [
             },
         },
     },
+    # ── 20 ── trigger_pipeline ────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "trigger_pipeline",
+            "description": (
+                "Fire off a background pipeline run. Use this after creating agent tasks "
+                "to ensure the specialist agents actually process them promptly. "
+                "pipeline_type='maintenance' runs the full orchestrator+specialists cycle. "
+                "pipeline_type='ingest' scans for new/changed files and processes them. "
+                "pipeline_type='ingest_scan' re-queues ALL unprocessed files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pipeline_type": {
+                        "type": "string",
+                        "enum": ["maintenance", "ingest", "ingest_scan"],
+                        "description": "Which pipeline to trigger.",
+                    },
+                },
+                "required": ["pipeline_type"],
+            },
+        },
+    },
+    # ── 21 ── manage_todo ─────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_todo",
+            "description": (
+                "Manage the director's personal todo list — a persistent planning scratchpad "
+                "stored with this session. Use this to track multi-step plans, "
+                "outstanding delegations, and follow-up tasks across conversation turns."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "complete", "remove", "list"],
+                        "description": (
+                            "add: append a new item (requires 'item'). "
+                            "complete: mark item done by id (requires 'item_id'). "
+                            "remove: delete item by id (requires 'item_id'). "
+                            "list: return all current items."
+                        ),
+                    },
+                    "item": {
+                        "type": "string",
+                        "description": "Text of the new todo item. Required for action='add'.",
+                    },
+                    "item_id": {
+                        "type": "integer",
+                        "description": "Numeric id of the item to complete or remove.",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
     # ── 18 ── complete_file_ingest ────────────────────────────────────────────
     {
         "type": "function",
@@ -759,6 +824,18 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "search_pages", "list_pages",
         "create_agent_task",
         "spawn_subagents",
+    ],
+    # Director: read everything + delegate via tasks + pipeline control + planning.
+    # Deliberately excludes propose/review/apply/add_page_relation to force delegation.
+    "director": [
+        "search_pages", "get_page", "list_pages",
+        "get_related_pages", "get_page_history",
+        "list_proposals",
+        "read_file", "list_files", "list_ingest_records",
+        "create_agent_task", "list_agent_tasks",
+        "spawn_subagents",
+        "trigger_pipeline",
+        "manage_todo",
     ],
 }
 

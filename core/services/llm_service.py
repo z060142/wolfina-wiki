@@ -184,6 +184,7 @@ def resolve_model(agent_type: str) -> str:
         "executor": settings.executor_agent_model,
         "relation": settings.relation_agent_model,
         "orchestrator": settings.orchestrator_agent_model,
+        "director": settings.director_agent_model,
     }
     return per_agent.get(agent_type) or settings.default_model
 

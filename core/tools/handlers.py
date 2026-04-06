@@ -601,6 +601,44 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
     }
 
 
+async def _trigger_pipeline(inp: dict, db: AsyncSession) -> dict:
+    import asyncio
+    from core.db.base import AsyncSessionLocal
+
+    pipeline_type = inp.get("pipeline_type", "maintenance")
+
+    async def _run_maintenance() -> None:
+        from core.services.agent_service import run_maintenance_pipeline
+        async with AsyncSessionLocal() as _db:
+            try:
+                await run_maintenance_pipeline(_db)
+            except Exception:
+                logger.exception("Background maintenance pipeline error (director-triggered)")
+
+    async def _run_ingest(scan: bool = False) -> None:
+        from core.services.agent_service import run_ingest_pipeline
+        async with AsyncSessionLocal() as _db:
+            try:
+                await run_ingest_pipeline(_db, scan_unprocessed=scan)
+            except Exception:
+                logger.exception("Background ingest pipeline error (director-triggered)")
+
+    if pipeline_type == "maintenance":
+        asyncio.ensure_future(_run_maintenance())
+        message = "Maintenance pipeline queued."
+    elif pipeline_type == "ingest":
+        asyncio.ensure_future(_run_ingest(scan=False))
+        message = "Ingest pipeline queued (new/changed/failed files)."
+    elif pipeline_type == "ingest_scan":
+        asyncio.ensure_future(_run_ingest(scan=True))
+        message = "Ingest scan pipeline queued (all unprocessed files)."
+    else:
+        return {"error": f"Unknown pipeline_type: {pipeline_type}"}
+
+    debug_stream.emit("pipeline_triggered", pipeline_type=pipeline_type, source="director")
+    return {"status": "queued", "pipeline_type": pipeline_type, "message": message}
+
+
 # ── dispatch table ────────────────────────────────────────────────────────────
 
 _HANDLERS: dict[str, Any] = {
@@ -623,6 +661,8 @@ _HANDLERS: dict[str, Any] = {
     "list_ingest_records": _list_ingest_records,
     "complete_file_ingest": _complete_file_ingest,
     "spawn_subagents": _spawn_subagents,
+    "trigger_pipeline": _trigger_pipeline,
+    # manage_todo is handled directly in director_service, not via dispatch_tool
 }
 
 
