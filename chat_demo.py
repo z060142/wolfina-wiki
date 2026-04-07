@@ -231,8 +231,13 @@ class LLMClient:
             self._http = httpx.Client(timeout=120.0)
         else:
             # Ollama
-            self._ollama_host = env.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-            self._http = httpx.Client(timeout=120.0)
+            from ollama import Client as OllamaSDK
+            ollama_host = env.get("OLLAMA_HOST", "http://localhost:11434")
+            ollama_key = env.get("OLLAMA_API_KEY", "")
+            self._ollama = OllamaSDK(
+                host=ollama_host,
+                headers={"Authorization": "Bearer " + ollama_key},
+            )
 
     def chat(self, messages: list[dict]) -> str:
         if self._provider == "openai_compat":
@@ -252,12 +257,8 @@ class LLMClient:
         return r.json()["choices"][0]["message"]["content"]
 
     def _chat_ollama(self, messages: list[dict]) -> str:
-        r = self._http.post(
-            f"{self._ollama_host}/api/chat",
-            json={"model": self._model, "messages": messages, "stream": False},
-        )
-        r.raise_for_status()
-        return r.json()["message"]["content"]
+        resp = self._ollama.chat(model=self._model, messages=messages)
+        return resp.message.content
 
     def close(self) -> None:
         self._http.close()
