@@ -89,6 +89,19 @@ multi-agent pipeline to fulfil them.
 - list_agent_tasks(status="pending"): Check what's still waiting to be processed.
 - list_proposals(status="pending"): See proposals awaiting review.
 
+== TODO LIST ==
+Use manage_todo to track active work items. The list holds up to 10 items.
+When it is full, use manage_note to record deferred tasks instead of silently dropping them.
+Mark items complete as soon as the corresponding pipeline work is queued or confirmed done.
+
+== NOTES ==
+Use manage_note only after hitting a dead-end — an error or a condition that blocks you
+from completing a task right now. Do not use it proactively as a planning tool.
+Common triggers: manage_todo returns a capacity error; a tool call fails and cannot be
+retried immediately; a task is blocked on something outside your control.
+Every active note is injected into your context under "ACTIVE NOTES" at the start of each
+turn. Resolve a note once its completion_criteria are satisfied.
+
 == CONTEXT WINDOW ==
 Your full conversation history with the user is stored and restored on every turn.
 You have long-term memory of everything discussed in this session.
@@ -134,6 +147,9 @@ async def delete_session(db: AsyncSession, session_id: str) -> bool:
     return True
 
 
+MAX_TODO_ITEMS = 10
+
+
 # ── manage_todo (handled here, not in dispatch_tool) ─────────────────────────
 
 def _handle_manage_todo(inp: dict, todo_list: list[dict]) -> dict:
@@ -147,6 +163,15 @@ def _handle_manage_todo(inp: dict, todo_list: list[dict]) -> dict:
         item_text = inp.get("item", "").strip()
         if not item_text:
             return {"error": "item text is required for action='add'"}
+        active_count = sum(1 for t in todo_list if not t["done"])
+        if active_count >= MAX_TODO_ITEMS:
+            return {
+                "error": (
+                    f"Todo list is full ({active_count}/{MAX_TODO_ITEMS} active items). "
+                    "Use manage_note to record this as a deferred note instead, "
+                    "or complete/remove existing items first."
+                )
+            }
         new_id = max((t["id"] for t in todo_list), default=0) + 1
         entry = {
             "id": new_id,
@@ -179,6 +204,66 @@ def _handle_manage_todo(inp: dict, todo_list: list[dict]) -> dict:
     return {"error": f"Unknown action: {action}"}
 
 
+# ── manage_note (handled here, not in dispatch_tool) ─────────────────────────
+
+def _handle_manage_note(inp: dict, notes: list[dict]) -> dict:
+    """Mutates notes in-place and returns result dict."""
+    action = inp.get("action", "list")
+
+    if action == "list":
+        active = [n for n in notes if not n["resolved"]]
+        tag_filter = inp.get("tag_filter", "").strip().lower()
+        if tag_filter:
+            active = [n for n in active if any(tag_filter in t.lower() for t in n["tags"])]
+        return {"notes": active, "count": len(active)}
+
+    if action == "write":
+        body = inp.get("body", "").strip()
+        if not body:
+            return {"error": "body is required for action='write'"}
+        new_id = max((n["id"] for n in notes), default=0) + 1
+        entry = {
+            "id": new_id,
+            "body": body,
+            "completion_criteria": inp.get("completion_criteria", "").strip(),
+            "tags": [t.strip() for t in (inp.get("tags") or []) if t.strip()],
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "resolved": False,
+        }
+        notes.append(entry)
+        return {"written": entry, "active_count": sum(1 for n in notes if not n["resolved"])}
+
+    if action == "resolve":
+        note_id = inp.get("note_id")
+        if note_id is None:
+            return {"error": "note_id is required for action='resolve'"}
+        for n in notes:
+            if n["id"] == int(note_id):
+                n["resolved"] = True
+                n["resolved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                return {"resolved": n, "active_count": sum(1 for n2 in notes if not n2["resolved"])}
+        return {"error": f"Note {note_id} not found."}
+
+    return {"error": f"Unknown action: {action}"}
+
+
+def _build_notes_context(notes: list[dict]) -> str:
+    """Return a system-prompt section for active notes, or empty string if none."""
+    active = [n for n in notes if not n["resolved"]]
+    if not active:
+        return ""
+    lines = ["\n== ACTIVE NOTES (deferred tasks — review and act when conditions are met) =="]
+    for n in active:
+        lines.append(f"\n[Note #{n['id']}] Created: {n['created_at']}")
+        if n["tags"]:
+            lines.append(f"  Tags: {', '.join(n['tags'])}")
+        lines.append(f"  Task: {n['body']}")
+        if n.get("completion_criteria"):
+            lines.append(f"  Done when: {n['completion_criteria']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 # ── main conversation turn ────────────────────────────────────────────────────
 
 async def run_director_turn(
@@ -204,10 +289,15 @@ async def run_director_turn(
     # Load persistent state
     messages: list[dict] = json.loads(session.messages or "[]")
     todo_list: list[dict] = json.loads(session.todo_list or "[]")
+    notes: list[dict] = json.loads(session.notes or "[]")
+
+    # Build system prompt — inject active notes so they're always visible
+    notes_context = _build_notes_context(notes)
+    system_prompt = _DIRECTOR_PROMPT + notes_context
 
     # Build the full message list for this turn
     history: list[dict] = (
-        [{"role": "system", "content": _DIRECTOR_PROMPT}]
+        [{"role": "system", "content": system_prompt}]
         + messages
         + [{"role": "user", "content": user_message}]
     )
@@ -267,9 +357,11 @@ async def run_director_turn(
                     "pipeline_type": tc.arguments.get("pipeline_type", "?"),
                 })
 
-            # Handle manage_todo locally (needs todo_list reference)
+            # Handle manage_todo / manage_note locally (need in-memory list references)
             if tc.name == "manage_todo":
                 result = _handle_manage_todo(tc.arguments, todo_list)
+            elif tc.name == "manage_note":
+                result = _handle_manage_note(tc.arguments, notes)
             else:
                 result = await dispatch_tool(tc.name, tc.arguments, db)
 
@@ -303,6 +395,7 @@ async def run_director_turn(
     messages.extend(new_messages)
     session.messages = json.dumps(messages)
     session.todo_list = json.dumps(todo_list)
+    session.notes = json.dumps(notes)
     session.updated_at = datetime.now(timezone.utc)
     await db.commit()
 

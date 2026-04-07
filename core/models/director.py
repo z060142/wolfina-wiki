@@ -26,6 +26,9 @@ class DirectorSession(Base):
     # JSON-encoded list of {id, text, done, created_at}
     todo_list: Mapped[str] = mapped_column(Text, default="[]")
 
+    # JSON-encoded list of {id, body, completion_criteria, tags, created_at, resolved}
+    notes: Mapped[str] = mapped_column(Text, default="[]")
+
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc)
     )

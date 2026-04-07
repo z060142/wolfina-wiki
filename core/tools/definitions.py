@@ -2,7 +2,7 @@
 
 These are compatible with both the Ollama SDK and any OpenAI-compat API.
 
-21 tools — each has a distinct purpose with zero functional overlap:
+22 tools — each has a distinct purpose with zero functional overlap:
 
   Read-only (wiki):
     1. search_pages       — keyword search across title/content/summary
@@ -39,7 +39,8 @@ These are compatible with both the Ollama SDK and any OpenAI-compat API.
 
   Director-only:
    20. trigger_pipeline   — fire off a background pipeline (maintenance/ingest)
-   21. manage_todo        — manage the director's personal todo list
+   21. manage_todo        — manage the director's personal todo list (max 10 active items)
+   22. manage_note        — write deferred notes with completion criteria and tags for context injection
 """
 
 from __future__ import annotations
@@ -732,6 +733,75 @@ TOOLS: list[dict] = [
             },
         },
     },
+    # ── 22 ── manage_note ─────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_note",
+            "description": (
+                "Write a note to yourself when you hit a dead-end that blocks you from completing "
+                "a task right now. Reach for this tool AFTER receiving an error or blocking condition — "
+                "not as a general planning mechanism. Typical triggers:\n"
+                "- manage_todo returns a capacity error (todo list full).\n"
+                "- A tool call fails and you cannot retry immediately.\n"
+                "- A task is blocked waiting for something outside your control "
+                "(ingest not finished, page doesn't exist yet, pipeline busy).\n"
+                "Each note records: body (what you were trying to do and couldn't), "
+                "completion_criteria (what done looks like when you revisit), "
+                "and tags (e.g. 'after_ingest', 'blocked:review', 'page:python-basics'). "
+                "All active notes are injected into your context at the start of every turn. "
+                "Resolve a note once its criteria are satisfied."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["write", "list", "resolve"],
+                        "description": (
+                            "write: create a new note (requires 'body'; completion_criteria and tags are optional). "
+                            "list: return all active notes. "
+                            "resolve: mark a note as done by note_id (requires 'note_id')."
+                        ),
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "What needs to be done — a clear, self-contained description of the deferred task. "
+                            "Required for action='write'."
+                        ),
+                    },
+                    "completion_criteria": {
+                        "type": "string",
+                        "description": (
+                            "What 'done' looks like for this note. Describe the observable outcome or state "
+                            "that indicates the task is complete. Helps you verify completion later."
+                        ),
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Labels that describe when or why this note is relevant. "
+                            "Suggested conventions: 'after_ingest', 'when_todo_free', 'low_priority', "
+                            "'blocked:<reason>', 'page:<slug>', 'batch:<id>'. "
+                            "All active notes are always injected into context regardless of tags, "
+                            "but tags help you remember the original intent and filter with list."
+                        ),
+                    },
+                    "note_id": {
+                        "type": "integer",
+                        "description": "Numeric ID of the note to resolve. Required for action='resolve'.",
+                    },
+                    "tag_filter": {
+                        "type": "string",
+                        "description": "Optional tag substring to filter notes when action='list'.",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
     # ── 18 ── complete_file_ingest ────────────────────────────────────────────
     {
         "type": "function",
@@ -836,6 +906,7 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "spawn_subagents",
         "trigger_pipeline",
         "manage_todo",
+        "manage_note",
     ],
 }
 

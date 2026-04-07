@@ -20,6 +20,8 @@ async def lifespan(app: FastAPI):
     import_models()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Enable WAL mode so concurrent readers don't block the writer.
+        await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
 
     # Start the background maintenance scheduler.
     from core.services.scheduler_service import scheduler
