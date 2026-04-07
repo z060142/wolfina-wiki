@@ -45,6 +45,18 @@ class UserQueryResponse(BaseModel):
     cache_age_seconds: float | None = None
 
 
+class DirectQueryRequest(BaseModel):
+    query: str = Field(..., description="Free-form query string (e.g. a username, topic, or question).")
+    summary_instruction: str | None = Field(None, description="Custom instruction for the LLM summariser. Overrides config default.")
+    max_words: int = Field(500, description="Maximum words in the returned summary.")
+
+
+class DirectQueryResponse(BaseModel):
+    query: str
+    summary: str
+    sources: list[str]
+
+
 class ConversationTurn(BaseModel):
     """One exchange: a user message plus the bot's thoughts and dialogue."""
     timestamp: str
@@ -202,6 +214,43 @@ async def query_user(
         sources=sources,
         cached=False,
         cache_age_seconds=None,
+    )
+
+
+# ── POST /wolfchat/query ───────────────────────────────────────────────────────
+
+@router.post("/query", response_model=DirectQueryResponse)
+async def direct_query(
+    body: DirectQueryRequest,
+    db: AsyncSession = Depends(get_db),
+) -> DirectQueryResponse:
+    """Run a live quick_query without caching. Intended for Wolf Chat's LLM to call
+    autonomously when it needs up-to-date wiki information mid-conversation.
+
+    Unlike GET /wolfchat/user/{username}, results are never cached and the query
+    string is not limited to a username — any topic or free-form question works.
+    """
+    cfg = load_config()
+    instruction: str = body.summary_instruction or cfg.get("query_summary_instruction", "")
+
+    from core.tools.handlers import _quick_query
+
+    result = await _quick_query(
+        {
+            "query": body.query,
+            "summary_instruction": instruction,
+            "max_words": body.max_words,
+        },
+        db,
+    )
+
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return DirectQueryResponse(
+        query=body.query,
+        summary=result["summary"],
+        sources=result.get("sources", []),
     )
 
 

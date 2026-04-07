@@ -21,6 +21,7 @@ plugins/wolfchat/
 | Method | Path | 說明 |
 |--------|------|------|
 | `GET`  | `/wolfchat/user/{username}` | 查詢用戶資料，快取 10 分鐘 |
+| `POST` | `/wolfchat/query` | 即時查詢（無快取），供 LLM 自主呼叫 |
 | `POST` | `/wolfchat/conversation` | 接收對話紀錄並推入 wiki pipeline |
 | `GET`  | `/wolfchat/status` | 診斷資訊（快取狀態、設定快照）|
 | `POST` | `/wolfchat/webhook` | 預留，尚未實作（回傳 501）|
@@ -42,6 +43,35 @@ Response:
 - 查詢指令已在 `config.json` 的 `query_summary_instruction` 中定義
 - 查不到資料時，summary 會明確說 "No data found for this user."
 - 快取 TTL 由 `query_cache_ttl_seconds`（預設 600 秒）控制
+
+### POST /wolfchat/query
+**供 Wolf Chat 的 LLM 自主呼叫，即時查詢 wiki（不使用快取）。**
+
+適用場景：LLM 在對話中途需要動態查詢特定用戶或主題的最新資料（例如工具呼叫）。
+
+Request body:
+```json
+{
+  "query": "SherefoxUwU",
+  "summary_instruction": "（選填）覆蓋 config 中的摘要指令",
+  "max_words": 500
+}
+```
+
+Response:
+```json
+{
+  "query": "SherefoxUwU",
+  "summary": "...(即時查詢結果)...",
+  "sources": ["page-slug-1"]
+}
+```
+
+- `query` 不限於用戶名稱，可以是任何主題或問題
+- 每次呼叫都會執行完整的 quick_query pipeline，不讀快取也不寫快取
+- `summary_instruction` 留空時使用 `config.json` 中的預設指令
+
+---
 
 ### POST /wolfchat/conversation
 **Wolf Chat 對話結束後呼叫此 endpoint 推送對話紀錄。**
@@ -153,6 +183,11 @@ curl http://localhost:8000/wolfchat/user/SherefoxUwU
 
 # 查看 plugin 狀態
 curl http://localhost:8000/wolfchat/status
+
+# 即時查詢（無快取）
+curl -X POST http://localhost:8000/wolfchat/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "SherefoxUwU", "max_words": 300}'
 
 # 推送對話紀錄
 curl -X POST http://localhost:8000/wolfchat/conversation \
