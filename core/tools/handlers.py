@@ -608,6 +608,85 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
     }
 
 
+async def _quick_query(inp: dict, db: AsyncSession) -> dict:
+    """Drive a focused query agent and return its summarised answer."""
+    from core.db.base import AsyncSessionLocal
+    from core.services.llm_service import run_tool_loop
+    from core.tools.definitions import TOOL_MAP
+
+    _ALL_QUERY_TOOLS = [
+        "search_pages", "get_page", "list_pages",
+        "get_related_pages", "get_page_history",
+        "read_file", "list_files",
+    ]
+
+    query = inp.get("query", "").strip()
+    if not query:
+        return {"error": "query is required."}
+
+    summary_instruction = inp.get("summary_instruction", "").strip()
+    max_words = min(max(10, int(inp.get("max_words", 150))), 800)
+
+    # Validate and filter the allowed_tools list if provided
+    requested_tools = inp.get("allowed_tools")
+    if requested_tools:
+        tool_names = [t for t in requested_tools if t in _ALL_QUERY_TOOLS]
+        if not tool_names:
+            return {"error": "allowed_tools contains no valid query tool names."}
+    else:
+        tool_names = _ALL_QUERY_TOOLS
+
+    tool_defs = [TOOL_MAP[n] for n in tool_names if n in TOOL_MAP]
+
+    summary_directive = (
+        summary_instruction
+        if summary_instruction
+        else "Produce a concise, neutral summary of the findings."
+    )
+
+    system_prompt = (
+        "You are a focused read-only query agent. You have been given a single query.\n"
+        "Use your available tools to gather the relevant information, then produce a summary.\n\n"
+        f"Summary instruction: {summary_directive}\n"
+        f"Word limit: {max_words} words maximum for the summary.\n\n"
+        "At the end of your response, add a '## Sources' section listing every page slug "
+        "or file path you consulted, one per line. Do not perform write operations."
+    )
+    user_message = query
+
+    debug_stream.emit("quick_query_start", query=query[:120], max_words=max_words)
+    try:
+        async with AsyncSessionLocal() as query_db:
+            raw_result = await run_tool_loop(
+                agent_type="quick_query",
+                system_prompt=system_prompt,
+                user_message=user_message,
+                tool_definitions=tool_defs,
+                db=query_db,
+                max_iterations=12,
+            )
+    except Exception as exc:
+        logger.warning("quick_query failed: %s", exc)
+        debug_stream.emit("quick_query_error", error=str(exc))
+        return {"error": str(exc)}
+
+    # Split off the Sources section if the agent included one
+    summary = raw_result
+    sources: list[str] = []
+    if "## Sources" in raw_result:
+        parts = raw_result.split("## Sources", 1)
+        summary = parts[0].strip()
+        sources = [line.strip("- \t") for line in parts[1].strip().splitlines() if line.strip()]
+
+    debug_stream.emit(
+        "quick_query_done",
+        query=query[:120],
+        summary_preview=(summary[:100] + "…") if len(summary) > 100 else summary,
+        sources=sources,
+    )
+    return {"summary": summary, "sources": sources}
+
+
 async def _trigger_pipeline(inp: dict, db: AsyncSession) -> dict:
     import asyncio
     from core.db.base import AsyncSessionLocal
@@ -668,6 +747,7 @@ _HANDLERS: dict[str, Any] = {
     "list_ingest_records": _list_ingest_records,
     "complete_file_ingest": _complete_file_ingest,
     "spawn_subagents": _spawn_subagents,
+    "quick_query": _quick_query,
     "trigger_pipeline": _trigger_pipeline,
     # manage_todo is handled directly in director_service, not via dispatch_tool
 }

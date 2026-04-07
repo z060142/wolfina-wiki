@@ -46,6 +46,7 @@ class Settings(BaseSettings):
 
     # ── Per-agent model overrides (continued) ─────────────────────────────────
     director_agent_model: str = ""
+    quick_query_agent_model: str = ""
 
     # ── Conversation flush thresholds ─────────────────────────────────────────
     flush_max_messages: int = 50         # flush after N messages

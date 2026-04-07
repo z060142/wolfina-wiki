@@ -2,7 +2,7 @@
 
 These are compatible with both the Ollama SDK and any OpenAI-compat API.
 
-22 tools — each has a distinct purpose with zero functional overlap:
+23 tools — each has a distinct purpose with zero functional overlap:
 
   Read-only (wiki):
     1. search_pages       — keyword search across title/content/summary
@@ -36,6 +36,9 @@ These are compatible with both the Ollama SDK and any OpenAI-compat API.
 
   Subagent delegation:
    19. spawn_subagents    — run up to 2 isolated read-only subagents in parallel
+
+  Query pipeline:
+   23. quick_query        — drive a focused query agent: search, gather, summarise in one call
 
   Director-only:
    20. trigger_pipeline   — fire off a background pipeline (maintenance/ingest)
@@ -672,6 +675,64 @@ TOOLS: list[dict] = [
             },
         },
     },
+    # ── 23 ── quick_query ─────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "quick_query",
+            "description": (
+                "Drive a focused query agent that searches the wiki and files, then returns a "
+                "concise summary. The caller controls what to look for, how to summarise it, "
+                "and the word-count limit. Use this when you need a targeted answer without "
+                "occupying your own context window with raw search results.\n\n"
+                "The query agent has access to: search_pages, get_page, list_pages, "
+                "get_related_pages, get_page_history, read_file, list_files.\n\n"
+                "Returns {\"summary\": \"...\", \"sources\": [...]} where sources lists the "
+                "page slugs or file paths consulted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "What to look up. Be specific — this is passed verbatim to the "
+                            "query agent as its main instruction. Include any disambiguation "
+                            "details the agent might need (e.g. which wiki, which file directory)."
+                        ),
+                    },
+                    "summary_instruction": {
+                        "type": "string",
+                        "description": (
+                            "How to format or focus the summary. Examples: "
+                            "'List the key facts as bullet points.', "
+                            "'Write a one-paragraph overview.', "
+                            "'Return only the most recent version number and its release date.'"
+                            "If omitted, the agent will produce a short neutral summary."
+                        ),
+                    },
+                    "max_words": {
+                        "type": "integer",
+                        "description": (
+                            "Hard word-count limit for the returned summary. "
+                            "Default 150, max 800."
+                        ),
+                    },
+                    "allowed_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of tool names to expose to the query agent. "
+                            "Must be a subset of: search_pages, get_page, list_pages, "
+                            "get_related_pages, get_page_history, read_file, list_files. "
+                            "Defaults to all of the above when omitted."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
     # ── 20 ── trigger_pipeline ────────────────────────────────────────────────
     {
         "type": "function",
@@ -859,12 +920,14 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "list_agent_tasks", "complete_agent_task",
         "read_file", "list_files",
         "spawn_subagents",
+        "quick_query",
     ],
     "proposer": [
         "search_pages", "get_page", "list_pages",
         "propose_new_page", "propose_page_edit",
         "list_agent_tasks", "complete_agent_task",
         "spawn_subagents",
+        "quick_query",
     ],
     "reviewer": [
         "search_pages", "get_page", "list_pages", "get_page_history",
@@ -886,6 +949,7 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "create_agent_task",
         "list_files", "list_ingest_records",
         "spawn_subagents",
+        "quick_query",
     ],
     "ingest": [
         "list_agent_tasks", "complete_agent_task",
@@ -894,6 +958,21 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "search_pages", "list_pages",
         "create_agent_task",
         "spawn_subagents",
+        "quick_query",
+    ],
+    # Director: read everything + delegate via tasks + pipeline control + planning.
+    # Deliberately excludes propose/review/apply/add_page_relation to force delegation.
+    "director": [
+        "search_pages", "get_page", "list_pages",
+        "get_related_pages", "get_page_history",
+        "list_proposals",
+        "read_file", "list_files", "list_ingest_records",
+        "create_agent_task", "list_agent_tasks",
+        "spawn_subagents",
+        "quick_query",
+        "trigger_pipeline",
+        "manage_todo",
+        "manage_note",
     ],
     # Director: read everything + delegate via tasks + pipeline control + planning.
     # Deliberately excludes propose/review/apply/add_page_relation to force delegation.
