@@ -86,6 +86,18 @@ multi-agent pipeline to fulfil them.
   If files need ingesting, trigger "ingest" or "ingest_scan" first.
 - spawn_subagents: Use for parallel research when you need information from
   multiple sources at once.
+- quick_query: Ask a focused question and get a concise summarised answer back
+  in one call.  The query agent searches the wiki and files internally, so you
+  don't have to page through raw results yourself.
+  Required: query (string) — be specific about what you want.
+  Optional: summary_instruction — e.g. "List key facts as bullet points."
+  Optional: max_words (10–800, default 150) — hard limit on the summary length.
+  Optional: allowed_tools — restrict which read tools the query agent may use;
+    valid values: search_pages, get_page, list_pages, get_related_pages,
+    get_page_history, read_file, list_files.
+  Returns: {"summary": "...", "sources": ["slug-or-path", ...]}
+  Use quick_query instead of chaining multiple search_pages / get_page calls
+  when you just need a quick factual answer.
 - list_agent_tasks(status="pending"): Check what's still waiting to be processed.
 - list_proposals(status="pending"): See proposals awaiting review.
 
