@@ -97,7 +97,7 @@ TOOLS: list[dict] = [
                     },
                     "slug": {
                         "type": "string",
-                        "description": "Page slug, e.g. 'python-basics' (mutually exclusive with page_id).",
+                        "description": "Page slug — ASCII lowercase letters and numbers only, words separated by hyphens. Example: 'python-basics', 'lin-xiaoguang'. NEVER use Chinese characters or spaces as a slug.",
                     },
                 },
             },
@@ -226,7 +226,7 @@ TOOLS: list[dict] = [
                     "title": {"type": "string", "description": "Page title."},
                     "slug": {
                         "type": "string",
-                        "description": "URL-friendly identifier (lowercase, hyphens). Must be unique.",
+                        "description": "URL-friendly identifier: ASCII lowercase letters and numbers only, words separated by hyphens. Pattern: ^[a-z0-9]+(?:-[a-z0-9]+)*$. Example: 'lin-xiaoguang', 'volume-1-overview'. NEVER use Chinese characters, spaces, or underscores.",
                     },
                     "content": {
                         "type": "string",
@@ -281,7 +281,7 @@ TOOLS: list[dict] = [
                     },
                     "proposed_title": {
                         "type": "string",
-                        "description": "New title (omit to keep existing).",
+                        "description": "New title. If you do not want to change the title, omit this field entirely (do NOT pass null).",
                     },
                     "proposed_content": {
                         "type": "string",
@@ -413,7 +413,7 @@ TOOLS: list[dict] = [
                 "properties": {
                     "agent_type": {
                         "type": "string",
-                        "enum": ["research", "proposer", "reviewer", "executor", "relation"],
+                        "enum": ["research", "proposer", "reviewer", "executor", "relation", "ingest"],
                         "description": "Which specialist agent should handle this task.",
                     },
                     "instruction": {
@@ -452,7 +452,7 @@ TOOLS: list[dict] = [
                     },
                     "agent_type": {
                         "type": "string",
-                        "enum": ["research", "proposer", "reviewer", "executor", "relation"],
+                        "enum": ["research", "proposer", "reviewer", "executor", "relation", "ingest"],
                     },
                     "batch_id": {"type": "string"},
                     "limit": {"type": "integer", "description": "Max results. Default 20."},

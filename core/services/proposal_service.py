@@ -193,10 +193,11 @@ async def apply_proposal(db: AsyncSession, proposal_id: str, data: ApplyRequest)
 
     if proposal.target_page_id:
         # Edit existing page.
+        existing_page = await page_service.get_page(db, proposal.target_page_id)
         page = await page_service.update_page_content(
             db,
             proposal.target_page_id,
-            title=proposal.proposed_title,
+            title=proposal.proposed_title or existing_page.title,
             content=proposal.proposed_content,
             summary=proposal.proposed_summary,
             canonical_facts=proposal.proposed_canonical_facts,
@@ -206,6 +207,9 @@ async def apply_proposal(db: AsyncSession, proposal_id: str, data: ApplyRequest)
     else:
         # Create new page from proposal.
         from core.schemas.page import PageCreate
+
+        if not proposal.proposed_title:
+            raise ValueError("proposed_title is required when creating a new page.")
 
         page = await page_service.create_page(
             db,

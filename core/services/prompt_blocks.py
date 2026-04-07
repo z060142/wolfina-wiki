@@ -64,7 +64,17 @@ BLOCK_PROPOSAL_GUIDELINES = """\
 - Always search first — call search_pages before deciding to create a new page.
 - Each proposal must include a clear, specific rationale.
 - Be conservative: only propose content that is clearly supported by the source material.
-- One pending proposal per page at a time — do not stack multiple proposals on the same page."""
+- One pending proposal per page at a time — do not stack multiple proposals on the same page.
+
+== SLUG FORMAT (critical) ==
+Slugs must match ^[a-z0-9]+(?:-[a-z0-9]+)*$ — ASCII lowercase letters/numbers, hyphen-separated.
+NEVER use Chinese characters, spaces, or underscores in a slug.
+Transliterate Chinese names to pinyin: 林小光 → lin-xiaoguang, 第一集 → volume-1.
+
+== propose_page_edit REQUIREMENTS ==
+- target_page_id must be a UUID obtained from get_page or search_pages. Never pass a slug or title.
+- proposed_title: omit the field entirely if you do not want to change the title (do NOT pass null).
+- proposed_content and proposed_summary are required."""
 
 BLOCK_ROLE_SEPARATION = """\
 == ROLE SEPARATION (enforced by the system) ==
@@ -105,9 +115,11 @@ Do not attempt to read an entire large file in one call.
 
 BLOCK_RELATION_TYPES = """\
 == PAGE RELATION TYPES ==
+The only valid relation_type values are: parent, child, related_to, references.
 - parent / child : hierarchical containment (e.g. "Python" is parent of "Python Basics")
 - related_to     : semantically related pages at the same level (bidirectional)
 - references     : one page cites or is derived from another (directional)
+Do NOT invent other relation types (e.g. event_participant, appears_in are INVALID).
 Always call get_related_pages before adding a relation — skip any that already exist.
 If add_page_relation returns an "already exists" error, do NOT retry."""
 

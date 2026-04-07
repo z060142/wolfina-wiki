@@ -172,6 +172,8 @@ async def _propose_new_page(inp: dict, db: AsyncSession) -> dict:
 
 
 async def _propose_page_edit(inp: dict, db: AsyncSession) -> dict:
+    if not inp.get("target_page_id"):
+        return {"error": "target_page_id is required for propose_page_edit. Use get_page or search_pages to find the page UUID first."}
     source_refs = inp.get("source_refs")
     data = ProposalCreate(
         target_page_id=inp["target_page_id"],
@@ -238,10 +240,13 @@ async def _add_page_relation(inp: dict, db: AsyncSession) -> dict:
 
 
 async def _create_agent_task(inp: dict, db: AsyncSession) -> dict:
+    ctx = inp.get("context_json")
+    if isinstance(ctx, dict):
+        ctx = json.dumps(ctx, ensure_ascii=False)
     task = AgentTask(
         agent_type=inp["agent_type"],
         instruction=inp["instruction"],
-        context_json=inp.get("context_json"),
+        context_json=ctx,
         batch_id=inp.get("batch_id"),
         status=TaskStatus.pending,
     )
@@ -574,7 +579,9 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
         if not root.exists():
             continue
         try:
-            for p in sorted(root.rglob(rglob_pattern)):
+            # Iterate lazily so the limit break fires before rglob exhausts the dir.
+            # Do NOT wrap in sorted() — that forces the entire generator into memory first.
+            for p in root.rglob(rglob_pattern):
                 if p in seen:
                     continue
                 seen.add(p)
@@ -585,16 +592,16 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
                         "size": p.stat().st_size,
                         "base_dir": str(root),
                     })
-                if len(found) >= limit:
-                    break
+                    if len(found) >= limit:
+                        break
         except Exception as exc:
             logger.warning("list_files glob error in %s: %s", root, exc)
         if len(found) >= limit:
             break
 
-    debug_stream.emit("file_list", pattern=pattern, count=len(found))
+    debug_stream.emit("file_list", pattern=rglob_pattern, count=len(found))
     return {
-        "pattern": pattern,
+        "pattern": rglob_pattern,
         "count": len(found),
         "truncated": len(found) >= limit,
         "files": found,
@@ -678,5 +685,7 @@ async def dispatch_tool(tool_name: str, tool_input: dict, db: AsyncSession) -> d
     try:
         return await handler(tool_input, db)
     except Exception as exc:
-        logger.warning("Tool %s raised %s: %s", tool_name, type(exc).__name__, exc)
-        return {"error": str(exc)}
+        error_msg = f"{type(exc).__name__}: {exc}"
+        logger.warning("Tool %s raised %s", tool_name, error_msg)
+        debug_stream.emit("tool_error", tool=tool_name, error=error_msg)
+        return {"error": error_msg}
