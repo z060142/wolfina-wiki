@@ -123,6 +123,14 @@ class DynamicScheduler:
         )
         from core.services.agent_service import run_ingest_pipeline, run_maintenance_pipeline
 
+        from core.services.conversation_service import flush_pending_windows
+        try:
+            triggered = await flush_pending_windows()
+            if triggered:
+                logger.info("Scheduler: flushed %d pending window(s)", triggered)
+        except Exception:
+            logger.exception("Scheduler: flush scan error")
+
         async with AsyncSessionLocal() as db:
             try:
                 await run_maintenance_pipeline(db)

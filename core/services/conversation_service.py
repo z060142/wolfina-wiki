@@ -251,6 +251,31 @@ async def _flush_background(window_id: str) -> None:
     scheduler.record_flush()
 
 
+async def flush_pending_windows() -> int:
+    """Scan all active windows and flush any that meet flush conditions.
+
+    Called by the scheduler on each tick so that time-based flush thresholds
+    are honoured even when no new messages arrive after the threshold is crossed.
+
+    Returns the number of windows for which a flush was triggered.
+    """
+    triggered = 0
+    async with AsyncSessionLocal() as db:
+        windows = await db.scalars(
+            select(ConversationWindow).where(ConversationWindow.status == WindowStatus.active)
+        )
+        for window in windows.all():
+            if _check_flush_conditions(window):
+                logger.info(
+                    "Scheduler flush scan: triggering flush for window %s "
+                    "(msgs=%d chars=%d)",
+                    window.id, window.message_count, window.total_char_count,
+                )
+                await trigger_flush(window.id)
+                triggered += 1
+    return triggered
+
+
 async def manual_flush(db: AsyncSession, window_id: str) -> None:
     """HTTP-triggered manual flush. Commits the status change then fires background task."""
     window = await db.scalar(

@@ -23,6 +23,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
@@ -235,11 +236,26 @@ async def ingest_conversation(
     if not turns:
         raise HTTPException(status_code=422, detail="No conversation turns could be parsed.")
 
-    # Create a new ConversationWindow for this batch
+    # Reuse an existing active window for the same source, or create one if none exists.
+    # This lets messages accumulate across multiple conversation batches until the
+    # wiki scheduler's natural flush conditions are met.
     effective_source = f"{source_id}:{body.session_id}" if body.session_id else source_id
-    window = await conversation_service.create_window(db, external_source_id=effective_source)
-    window_id = window.id
-    await db.commit()
+    from core.models.conversation import ConversationWindow, WindowStatus
+    existing = await db.scalar(
+        select(ConversationWindow)
+        .where(ConversationWindow.external_source_id == effective_source)
+        .where(ConversationWindow.status == WindowStatus.active)
+        .order_by(ConversationWindow.created_at.desc())
+        .limit(1)
+    )
+    if existing:
+        window_id = existing.id
+        logger.debug("[WolfChat] Reusing window %s for source '%s'", window_id, effective_source)
+    else:
+        window = await conversation_service.create_window(db, external_source_id=effective_source)
+        window_id = window.id
+        await db.commit()
+        logger.debug("[WolfChat] Created new window %s for source '%s'", window_id, effective_source)
 
     messages_added = 0
     flush_triggered = False
@@ -275,6 +291,7 @@ async def ingest_conversation(
         messages_added += 1
 
         if should_flush:
+            await conversation_service.trigger_flush(window_id)
             flush_triggered = True
 
     logger.info(
