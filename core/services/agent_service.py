@@ -381,8 +381,9 @@ async def run_flush_pipeline(
 async def run_maintenance_pipeline(db: AsyncSession) -> None:
     """Scheduled maintenance: orchestrator creates tasks, then specialists execute them.
 
-    Runs: orchestrator → research → proposer → reviewer → executor → relation
-    Each specialist only processes tasks the orchestrator created for it.
+    Runs: orchestrator → research → ingest → proposer → reviewer → executor → relation
+    Each specialist processes ALL pending tasks of its type (any source, any batch_id),
+    including tasks created by the Director agent.
     """
     import uuid
     batch_id = str(uuid.uuid4())
@@ -405,6 +406,12 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
     # Note: reviewer and executor also handle any globally pending/approved proposals
     # (maintenance proposer proposals do not carry the maintenance batch_id).
     _extra: dict[str, str] = {
+        "ingest": (
+            "For each ingest task, read the file at the path given in context_json, "
+            "produce a summary, then call complete_file_ingest (using the record_id from context_json) "
+            "and complete_agent_task. If context_json has no record_id, use list_ingest_records "
+            "to find the matching record by path, or skip and mark the task failed with a clear error."
+        ),
         "reviewer": (
             "Also use list_proposals with status=\"pending\" (no batch_id filter) "
             "to find any proposals awaiting review, and review them."
@@ -414,15 +421,16 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
             "to find any approved proposals, and apply them."
         ),
     }
-    for agent_type in ("research", "proposer", "reviewer", "executor", "relation"):
+    for agent_type in ("research", "ingest", "proposer", "reviewer", "executor", "relation"):
         agent_id = getattr(settings, f"{agent_type}_agent_id")
         extra = _extra.get(agent_type, "")
         specialist_msg = (
             f"batch_id: {batch_id}\n"
             f"{agent_type}_agent_id: {agent_id}\n\n"
-            f"Use list_agent_tasks with agent_type=\"{agent_type}\" and batch_id=\"{batch_id}\" "
-            f"to find your pending tasks. Execute each task using your tools "
-            f"(your agent id is \"{agent_id}\"). "
+            f"Use list_agent_tasks with agent_type=\"{agent_type}\" and status=\"pending\" "
+            f"to find ALL your pending tasks (do NOT filter by batch_id — process tasks from any source, "
+            f"including tasks created by the Director or previous pipeline runs). "
+            f"Execute each task using your tools (your agent id is \"{agent_id}\"). "
             + (f"{extra} " if extra else "")
             + "Call complete_agent_task with outcome=\"done\" or \"failed\" for each task when finished. "
             "If there are no tasks for you, do nothing."
@@ -619,9 +627,9 @@ async def run_ingest_pipeline(
         specialist_msg = (
             f"batch_id: {batch_id}\n"
             f"{agent_type}_agent_id: {agent_id}\n\n"
-            f'Use list_agent_tasks with agent_type="{agent_type}" and batch_id="{batch_id}" '
-            f'to find your pending tasks. Execute each task '
-            f'(your agent id is "{agent_id}"). '
+            f'Use list_agent_tasks with agent_type="{agent_type}" and status="pending" '
+            f'to find ALL your pending tasks (do NOT filter by batch_id). '
+            f'Execute each task (your agent id is "{agent_id}"). '
             + (f"{extra} " if extra else "")
             + 'Call complete_agent_task with outcome="done" or "failed" for each task. '
             "If there are no tasks for you, do nothing."
