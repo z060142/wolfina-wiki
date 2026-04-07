@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # Max LLM tool-loop iterations per agent run (safety limit)
     agent_max_iterations: int = 20
 
+    # ── Ollama chat_template_kwargs ───────────────────────────────────────────
+    # Set to true to pass {"thinking": False} in extra_body so models that
+    # support extended thinking (e.g. Qwen3, Kimi-K2) skip the thinking phase.
+    ollama_disable_thinking: bool = False
+
     # ── File read tool ────────────────────────────────────────────────────────
     # Comma-separated list of directories the LLM is allowed to read from.
     # Relative paths are resolved relative to the process working directory.

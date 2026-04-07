@@ -58,6 +58,8 @@ class OllamaClient:
         kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
         if tools:
             kwargs["tools"] = tools
+        if settings.ollama_disable_thinking:
+            kwargs["think"] = False
 
         try:
             resp = await self._client.chat(**kwargs)
