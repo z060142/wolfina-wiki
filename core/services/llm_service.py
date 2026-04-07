@@ -45,61 +45,51 @@ class LLMResponse:
 # ── provider clients ──────────────────────────────────────────────────────────
 
 class OllamaClient:
-    """httpx-based async client for Ollama REST API.
-
-    Uses /api/chat directly instead of the Ollama Python SDK to avoid
-    a Pydantic validation bug in the SDK where tool_call arguments returned
-    as JSON strings (instead of dicts) cause a hard error before we can
-    parse or fix them.
-    """
+    """ollama.AsyncClient-based client for Ollama API (local or remote)."""
 
     def __init__(self) -> None:
-        import httpx
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if settings.ollama_api_key:
-            headers["Authorization"] = f"Bearer {settings.ollama_api_key}"
-        self._base = settings.ollama_host.rstrip("/")
-        self._http = httpx.AsyncClient(headers=headers, timeout=120.0)
+        from ollama import AsyncClient
+        self._client = AsyncClient(
+            host=settings.ollama_host,
+            headers={"Authorization": "Bearer " + settings.ollama_api_key},
+        )
 
     async def chat(self, model: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-        }
+        kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
         if tools:
-            payload["tools"] = tools
+            kwargs["tools"] = tools
 
         try:
-            resp = await self._http.post(f"{self._base}/api/chat", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+            resp = await self._client.chat(**kwargs)
         except Exception as exc:
             logger.error("Ollama chat error: %s", exc)
             return LLMResponse(text=None, finish_reason="error")
 
-        msg = data.get("message", {})
-        raw_calls = msg.get("tool_calls") or []
+        msg = resp.message
+        raw_calls = getattr(msg, "tool_calls", None) or []
 
         if raw_calls:
             calls = []
             for i, tc in enumerate(raw_calls):
-                fn = tc.get("function", {})
-                args = fn.get("arguments", {})
+                fn = tc.function
+                args = fn.arguments
+                # SDK may return arguments as a dict or as a JSON string.
                 if isinstance(args, str):
                     try:
                         args = json.loads(args)
                     except json.JSONDecodeError:
                         args = {}
-                calls.append(ToolCall(id=str(i), name=fn.get("name", ""), arguments=args))
+                elif args is None:
+                    args = {}
+                calls.append(ToolCall(id=str(i), name=fn.name, arguments=args))
             return LLMResponse(
-                text=msg.get("content") or None,
+                text=getattr(msg, "content", None) or None,
                 tool_calls=calls,
                 finish_reason="tool_calls",
             )
 
-        done_reason = data.get("done_reason", "stop")
-        return LLMResponse(text=msg.get("content") or "", finish_reason=done_reason)
+        done_reason = getattr(resp, "done_reason", "stop") or "stop"
+        return LLMResponse(text=getattr(msg, "content", "") or "", finish_reason=done_reason)
 
 
 class OpenAICompatClient:
@@ -184,6 +174,8 @@ def resolve_model(agent_type: str) -> str:
         "executor": settings.executor_agent_model,
         "relation": settings.relation_agent_model,
         "orchestrator": settings.orchestrator_agent_model,
+        "director": settings.director_agent_model,
+        "quick_query": settings.quick_query_agent_model,
     }
     return per_agent.get(agent_type) or settings.default_model
 
@@ -241,27 +233,29 @@ async def run_tool_loop(
             break
 
         # ── tool call turn ────────────────────────────────────────────────────
+        is_openai_compat = settings.llm_provider == "openai_compat"
+
         # Append the assistant's tool-call message.
-        # Ollama expects arguments as a dict; OpenAI-compat expects a JSON string.
-        is_ollama = settings.llm_provider != "openai_compat"
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": resp.text or ""}
-        assistant_msg["tool_calls"] = [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.name,
-                    "arguments": tc.arguments if is_ollama else json.dumps(tc.arguments),
-                },
-            }
-            for tc in resp.tool_calls
-        ]
+        if is_openai_compat:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                }
+                for tc in resp.tool_calls
+            ]
+        else:
+            assistant_msg["tool_calls"] = [
+                {"function": {"name": tc.name, "arguments": tc.arguments}}
+                for tc in resp.tool_calls
+            ]
         messages.append(assistant_msg)
 
         # Execute each tool and append results.
         for tc in resp.tool_calls:
             logger.debug("Agent %s calling tool %s with %s", agent_type, tc.name, tc.arguments)
-            # Emit a compact preview of the arguments (truncate large values).
             args_str = json.dumps(tc.arguments, ensure_ascii=False, default=str)
             debug_stream.emit(
                 "agent_tool_call",
@@ -278,14 +272,12 @@ async def run_tool_loop(
                 result_preview=result_str[:200] + ("…" if len(result_str) > 200 else ""),
                 ok="error" not in result,
             )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tc.name,
-                    "content": result_str,
-                }
-            )
+            if is_openai_compat:
+                messages.append(
+                    {"role": "tool", "tool_call_id": tc.id, "name": tc.name, "content": result_str}
+                )
+            else:
+                messages.append({"role": "tool", "content": result_str})
 
     else:
         logger.warning("Agent %s reached max_iterations (%d)", agent_type, max_iter)

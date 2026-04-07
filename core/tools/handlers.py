@@ -172,6 +172,8 @@ async def _propose_new_page(inp: dict, db: AsyncSession) -> dict:
 
 
 async def _propose_page_edit(inp: dict, db: AsyncSession) -> dict:
+    if not inp.get("target_page_id"):
+        return {"error": "target_page_id is required for propose_page_edit. Use get_page or search_pages to find the page UUID first."}
     source_refs = inp.get("source_refs")
     data = ProposalCreate(
         target_page_id=inp["target_page_id"],
@@ -238,10 +240,13 @@ async def _add_page_relation(inp: dict, db: AsyncSession) -> dict:
 
 
 async def _create_agent_task(inp: dict, db: AsyncSession) -> dict:
+    ctx = inp.get("context_json")
+    if isinstance(ctx, dict):
+        ctx = json.dumps(ctx, ensure_ascii=False)
     task = AgentTask(
         agent_type=inp["agent_type"],
         instruction=inp["instruction"],
-        context_json=inp.get("context_json"),
+        context_json=ctx,
         batch_id=inp.get("batch_id"),
         status=TaskStatus.pending,
     )
@@ -548,7 +553,11 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
     if not allowed_dirs:
         return {"error": "No valid allowed directories configured."}
 
-    pattern = inp.get("pattern", "**/*") or "**/*"
+    # Normalise pattern for rglob: strip leading "**/" so callers can pass either
+    # "*.md" or "**/*.md" and both recurse into subdirectories correctly.
+    raw_pattern = inp.get("pattern") or ""
+    import re as _re
+    rglob_pattern = _re.sub(r"^\*\*/", "", raw_pattern) if raw_pattern else "*"
     limit = min(max(1, int(inp.get("limit", 50))), 200)
 
     # Determine search roots
@@ -570,7 +579,9 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
         if not root.exists():
             continue
         try:
-            for p in sorted(root.glob(pattern)):
+            # Iterate lazily so the limit break fires before rglob exhausts the dir.
+            # Do NOT wrap in sorted() — that forces the entire generator into memory first.
+            for p in root.rglob(rglob_pattern):
                 if p in seen:
                     continue
                 seen.add(p)
@@ -581,20 +592,137 @@ async def _list_files(inp: dict, db: AsyncSession) -> dict:
                         "size": p.stat().st_size,
                         "base_dir": str(root),
                     })
-                if len(found) >= limit:
-                    break
+                    if len(found) >= limit:
+                        break
         except Exception as exc:
             logger.warning("list_files glob error in %s: %s", root, exc)
         if len(found) >= limit:
             break
 
-    debug_stream.emit("file_list", pattern=pattern, count=len(found))
+    debug_stream.emit("file_list", pattern=rglob_pattern, count=len(found))
     return {
-        "pattern": pattern,
+        "pattern": rglob_pattern,
         "count": len(found),
         "truncated": len(found) >= limit,
         "files": found,
     }
+
+
+async def _quick_query(inp: dict, db: AsyncSession) -> dict:
+    """Drive a focused query agent and return its summarised answer."""
+    from core.db.base import AsyncSessionLocal
+    from core.services.llm_service import run_tool_loop
+    from core.tools.definitions import TOOL_MAP
+
+    _ALL_QUERY_TOOLS = [
+        "search_pages", "get_page", "list_pages",
+        "get_related_pages", "get_page_history",
+        "read_file", "list_files",
+    ]
+
+    query = inp.get("query", "").strip()
+    if not query:
+        return {"error": "query is required."}
+
+    summary_instruction = inp.get("summary_instruction", "").strip()
+    max_words = min(max(10, int(inp.get("max_words", 150))), 800)
+
+    # Validate and filter the allowed_tools list if provided
+    requested_tools = inp.get("allowed_tools")
+    if requested_tools:
+        tool_names = [t for t in requested_tools if t in _ALL_QUERY_TOOLS]
+        if not tool_names:
+            return {"error": "allowed_tools contains no valid query tool names."}
+    else:
+        tool_names = _ALL_QUERY_TOOLS
+
+    tool_defs = [TOOL_MAP[n] for n in tool_names if n in TOOL_MAP]
+
+    summary_directive = (
+        summary_instruction
+        if summary_instruction
+        else "Produce a concise, neutral summary of the findings."
+    )
+
+    system_prompt = (
+        "You are a focused read-only query agent. You have been given a single query.\n"
+        "Use your available tools to gather the relevant information, then produce a summary.\n\n"
+        f"Summary instruction: {summary_directive}\n"
+        f"Word limit: {max_words} words maximum for the summary.\n\n"
+        "At the end of your response, add a '## Sources' section listing every page slug "
+        "or file path you consulted, one per line. Do not perform write operations."
+    )
+    user_message = query
+
+    debug_stream.emit("quick_query_start", query=query[:120], max_words=max_words)
+    try:
+        async with AsyncSessionLocal() as query_db:
+            raw_result = await run_tool_loop(
+                agent_type="quick_query",
+                system_prompt=system_prompt,
+                user_message=user_message,
+                tool_definitions=tool_defs,
+                db=query_db,
+                max_iterations=12,
+            )
+    except Exception as exc:
+        logger.warning("quick_query failed: %s", exc)
+        debug_stream.emit("quick_query_error", error=str(exc))
+        return {"error": str(exc)}
+
+    # Split off the Sources section if the agent included one
+    summary = raw_result
+    sources: list[str] = []
+    if "## Sources" in raw_result:
+        parts = raw_result.split("## Sources", 1)
+        summary = parts[0].strip()
+        sources = [line.strip("- \t") for line in parts[1].strip().splitlines() if line.strip()]
+
+    debug_stream.emit(
+        "quick_query_done",
+        query=query[:120],
+        summary_preview=(summary[:100] + "…") if len(summary) > 100 else summary,
+        sources=sources,
+    )
+    return {"summary": summary, "sources": sources}
+
+
+async def _trigger_pipeline(inp: dict, db: AsyncSession) -> dict:
+    import asyncio
+    from core.db.base import AsyncSessionLocal
+
+    pipeline_type = inp.get("pipeline_type", "maintenance")
+
+    async def _run_maintenance() -> None:
+        from core.services.agent_service import run_maintenance_pipeline
+        async with AsyncSessionLocal() as _db:
+            try:
+                await run_maintenance_pipeline(_db)
+            except Exception:
+                logger.exception("Background maintenance pipeline error (director-triggered)")
+
+    async def _run_ingest(scan: bool = False) -> None:
+        from core.services.agent_service import run_ingest_pipeline
+        async with AsyncSessionLocal() as _db:
+            try:
+                await run_ingest_pipeline(_db, scan_unprocessed=scan)
+            except Exception:
+                logger.exception("Background ingest pipeline error (director-triggered)")
+
+    if pipeline_type == "maintenance":
+        asyncio.ensure_future(_run_maintenance())
+        message = "Maintenance pipeline queued."
+    elif pipeline_type == "ingest":
+        asyncio.ensure_future(_run_ingest(scan=False))
+        message = "Ingest pipeline queued (new/changed/failed files)."
+    elif pipeline_type == "ingest_scan":
+        asyncio.ensure_future(_run_ingest(scan=True))
+        message = "Ingest scan pipeline queued (all unprocessed files)."
+    else:
+        return {"error": f"Unknown pipeline_type: {pipeline_type}"}
+
+    debug_stream.emit("pipeline_triggered", pipeline_type=pipeline_type, source="director")
+    return {"status": "queued", "pipeline_type": pipeline_type, "message": message}
 
 
 # ── dispatch table ────────────────────────────────────────────────────────────
@@ -619,6 +747,9 @@ _HANDLERS: dict[str, Any] = {
     "list_ingest_records": _list_ingest_records,
     "complete_file_ingest": _complete_file_ingest,
     "spawn_subagents": _spawn_subagents,
+    "quick_query": _quick_query,
+    "trigger_pipeline": _trigger_pipeline,
+    # manage_todo is handled directly in director_service, not via dispatch_tool
 }
 
 
@@ -634,5 +765,7 @@ async def dispatch_tool(tool_name: str, tool_input: dict, db: AsyncSession) -> d
     try:
         return await handler(tool_input, db)
     except Exception as exc:
-        logger.warning("Tool %s raised %s: %s", tool_name, type(exc).__name__, exc)
-        return {"error": str(exc)}
+        error_msg = f"{type(exc).__name__}: {exc}"
+        logger.warning("Tool %s raised %s", tool_name, error_msg)
+        debug_stream.emit("tool_error", tool=tool_name, error=error_msg)
+        return {"error": error_msg}
