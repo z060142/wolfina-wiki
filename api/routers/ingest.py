@@ -48,6 +48,31 @@ async def trigger_ingest() -> dict:
     return {"status": "accepted", "message": "Ingest pipeline queued."}
 
 
+@router.post("/scan", status_code=202)
+async def scan_ingest() -> dict:
+    """Scan all allowed directories and queue every unprocessed file for ingest.
+
+    Unlike POST /ingest (which only picks up new/changed/failed files), this also
+    resets any files stuck in 'pending' or 'processing' state and re-queues them.
+    Use this when you want to ensure every file that hasn't reached status=done
+    gets processed.
+    """
+    async def _run() -> None:
+        from core.db.base import AsyncSessionLocal
+        from core.services.agent_service import run_ingest_pipeline
+        async with AsyncSessionLocal() as db:
+            try:
+                await run_ingest_pipeline(db, scan_unprocessed=True)
+            except Exception:
+                logger.exception("Background scan ingest pipeline error")
+
+    asyncio.ensure_future(_run())
+    return {
+        "status": "accepted",
+        "message": "Scan ingest queued — all unprocessed files (pending/processing/failed/new) will be re-queued.",
+    }
+
+
 @router.post("/force", status_code=202)
 async def force_ingest(body: ForceIngestRequest) -> dict:
     """Re-ingest specific files regardless of hash change."""

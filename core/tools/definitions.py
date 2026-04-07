@@ -974,6 +974,19 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "manage_todo",
         "manage_note",
     ],
+    # Director: read everything + delegate via tasks + pipeline control + planning.
+    # Deliberately excludes propose/review/apply/add_page_relation to force delegation.
+    "director": [
+        "search_pages", "get_page", "list_pages",
+        "get_related_pages", "get_page_history",
+        "list_proposals",
+        "read_file", "list_files", "list_ingest_records",
+        "create_agent_task", "list_agent_tasks",
+        "spawn_subagents",
+        "trigger_pipeline",
+        "manage_todo",
+        "manage_note",
+    ],
 }
 
 
