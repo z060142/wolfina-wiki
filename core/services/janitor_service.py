@@ -223,10 +223,12 @@ async def run_task_janitor(db: AsyncSession) -> JanitorReport:
     # ── 6. Old record purge: done/failed tasks older than retention window ────
     retention_cutoff = now - timedelta(days=settings.janitor_task_retention_days)
     deleted = await db.execute(
-        delete(AgentTask).where(
+        delete(AgentTask)
+        .where(
             AgentTask.status.in_([TaskStatus.done, TaskStatus.failed]),
             AgentTask.completed_at < retention_cutoff,
         )
+        .execution_options(synchronize_session=False)
     )
     report.old_records_deleted = deleted.rowcount
 
