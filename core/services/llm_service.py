@@ -281,6 +281,11 @@ async def run_tool_loop(
             else:
                 messages.append({"role": "tool", "content": result_str})
 
+        # Commit after each tool-call batch so write locks are released before
+        # the next (potentially slow) LLM call, reducing contention with
+        # concurrent writers (HTTP handlers, other pipelines).
+        await db.commit()
+
     else:
         logger.warning("Agent %s reached max_iterations (%d)", agent_type, max_iter)
 

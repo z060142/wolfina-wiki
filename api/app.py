@@ -22,6 +22,8 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
         # Enable WAL mode so concurrent readers don't block the writer.
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+        # NORMAL is safe with WAL and avoids fsync on every commit.
+        await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
 
     # Start the background maintenance scheduler.
     from core.services.scheduler_service import scheduler

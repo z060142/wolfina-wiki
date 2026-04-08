@@ -19,9 +19,25 @@ Scheduler maintenance pipeline (called by scheduler_service):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# ── Pipeline priority coordination ───────────────────────────────────────────
+# Flush pipelines (real-time conversation ingestion) take priority over the
+# background maintenance pipeline.  Maintenance yields between stages when any
+# flush is active or waiting.
+_flush_waiters: int = 0          # number of flush pipelines active or waiting
+_flush_done = asyncio.Event()    # fired each time a flush finishes
+_flush_done.set()                # starts in "no flush running" state
+
+
+async def _wait_for_flush_gap() -> None:
+    """Block until no flush pipeline is active. Used by maintenance stages."""
+    while _flush_waiters > 0:
+        _flush_done.clear()
+        await _flush_done.wait()
 
 from core.debug.event_stream import debug_stream
 from core.services.llm_service import run_tool_loop
@@ -315,7 +331,11 @@ async def run_flush_pipeline(
 
     Runs: proposer → reviewer → executor → relation
     Each stage commits its work to the DB before the next stage begins.
+    Flush pipelines take priority over the maintenance pipeline.
     """
+    global _flush_waiters, _flush_done
+    _flush_waiters += 1
+    _flush_done.clear()
     logger.info("Flush pipeline start — batch_id=%s", batch_id)
 
     # 1. Proposer
@@ -375,6 +395,9 @@ async def run_flush_pipeline(
         logger.exception("Flush pipeline: relation failed — batch_id=%s", batch_id)
         await db.rollback()
 
+    _flush_waiters -= 1
+    if _flush_waiters == 0:
+        _flush_done.set()
     logger.info("Flush pipeline complete — batch_id=%s", batch_id)
 
 
@@ -390,6 +413,8 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
     logger.info("Maintenance pipeline start — batch_id=%s", batch_id)
 
     # 1. Orchestrator builds the work queue
+    # Yield to any waiting flush pipeline before starting.
+    await _wait_for_flush_gap()
     orch_msg = (
         f"batch_id: {batch_id}\n\n"
         "Evaluate the current wiki state and create tasks for specialist agents as needed."
@@ -422,6 +447,8 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
         ),
     }
     for agent_type in ("research", "ingest", "proposer", "reviewer", "executor", "relation"):
+        # Yield between each specialist stage — flush pipelines take priority.
+        await _wait_for_flush_gap()
         agent_id = getattr(settings, f"{agent_type}_agent_id")
         extra = _extra.get(agent_type, "")
         specialist_msg = (
