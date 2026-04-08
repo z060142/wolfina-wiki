@@ -20,6 +20,7 @@ Type '/ingest' to trigger the file ingest pipeline (new/changed/failed files onl
 Type '/ingest ./docs/foo.md,./notes/bar.md' to force re-ingest specific files.
 Type '/scan' to scan all allowed dirs and process every unprocessed file.
 Type '/ingest-status' to show the current file ingest record status.
+Type '/maintenance' to manually trigger one maintenance pipeline run (orchestrator → specialists).
 """
 
 from __future__ import annotations
@@ -207,6 +208,11 @@ class WikiClient:
         r.raise_for_status()
         return r.json()
 
+    def trigger_maintenance(self) -> dict:
+        r = self._http.post(f"{self._base}/maintenance/trigger", headers=self._headers)
+        r.raise_for_status()
+        return r.json()
+
     def get_window(self, window_id: str) -> dict:
         r = self._http.get(
             f"{self._base}/conversations/windows/{window_id}",
@@ -366,6 +372,11 @@ def run_chat(wiki_url: str, persona_path: str) -> None:
             if force_paths:
                 for p in (result.get("paths") or []):
                     print(_color(f"  {p}", DIM))
+            continue
+
+        if user_input.lower() == "/maintenance":
+            result = wiki.trigger_maintenance()
+            print(_color(f"[wiki] {result['message']}", YELLOW))
             continue
 
         if user_input.lower() == "/ingest-status":

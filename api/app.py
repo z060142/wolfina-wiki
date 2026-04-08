@@ -77,6 +77,7 @@ def create_app() -> FastAPI:
     from api.routers.ingest import router as ingest_router
     from api.routers.director import router as director_router
     from api.routers.query import router as query_router
+    from api.routers.maintenance import router as maintenance_router
     from plugins.wolfchat.router import router as wolfchat_router
 
     app.include_router(pages_router)
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(ingest_router)
     app.include_router(director_router)
     app.include_router(query_router)
+    app.include_router(maintenance_router)
     app.include_router(wolfchat_router)
 
     @app.get("/health", tags=["meta"])
