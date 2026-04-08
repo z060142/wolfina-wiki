@@ -98,3 +98,5 @@ class AgentTask(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Incremented each time the janitor re-queues this task. Capped at janitor_max_task_retries.
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

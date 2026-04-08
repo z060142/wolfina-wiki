@@ -35,7 +35,10 @@ class DynamicScheduler:
     def __init__(self) -> None:
         self._flush_times: deque[datetime] = deque()
         self._task: asyncio.Task | None = None
+        self._janitor_task: asyncio.Task | None = None
         self._running = False
+        self._nudge_event: asyncio.Event = asyncio.Event()
+        self._maintenance_running: bool = False
 
     # ── public interface ──────────────────────────────────────────────────────
 
@@ -44,22 +47,26 @@ class DynamicScheduler:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="wiki-scheduler")
+        self._janitor_task = asyncio.create_task(self._janitor_loop(), name="wiki-janitor")
         logger.info(
-            "Scheduler started — min=%ds max=%ds window=%dh",
+            "Scheduler started — min=%ds max=%ds window=%dh | janitor=%ds",
             settings.scheduler_min_interval_seconds,
             settings.scheduler_max_interval_seconds,
             settings.scheduler_rate_window_hours,
+            settings.janitor_interval_seconds,
         )
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        for t in (self._task, self._janitor_task):
+            if t:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+        self._task = None
+        self._janitor_task = None
         logger.info("Scheduler stopped.")
 
     def record_flush(self) -> None:
@@ -80,6 +87,12 @@ class DynamicScheduler:
     def flush_rate(self) -> int:
         self._prune_old()
         return len(self._flush_times)
+
+    def nudge(self) -> None:
+        """Wake the maintenance loop early (called by janitor when stale tasks are found)."""
+        if not self._maintenance_running:
+            logger.info("Scheduler: nudged by janitor — waking maintenance loop early")
+            self._nudge_event.set()
 
     # ── internals ─────────────────────────────────────────────────────────────
 
@@ -103,13 +116,19 @@ class DynamicScheduler:
     async def _loop(self) -> None:
         while self._running:
             interval = self._calculate_interval()
-            logger.debug("Scheduler sleeping %ds", interval)
-            await asyncio.sleep(interval)
+            self._nudge_event.clear()
+            logger.debug("Scheduler sleeping %ds (or until nudged)", interval)
+            try:
+                await asyncio.wait_for(self._nudge_event.wait(), timeout=interval)
+                logger.info("Scheduler: woken early by nudge")
+            except asyncio.TimeoutError:
+                pass
             if not self._running:
                 break
             await self._run_maintenance()
 
     async def _run_maintenance(self) -> None:
+        self._maintenance_running = True
         logger.info(
             "Scheduler: running maintenance — flush_rate=%d/last-%dh",
             self.flush_rate(),
@@ -144,6 +163,24 @@ class DynamicScheduler:
                     await run_ingest_pipeline(db)
                 except Exception:
                     logger.exception("Scheduler: ingest pipeline error")
+
+        self._maintenance_running = False
+
+
+    async def _janitor_loop(self) -> None:
+        """Independent patrol loop — runs every janitor_interval_seconds regardless
+        of the maintenance pipeline cadence."""
+        # Stagger startup so the janitor doesn't fire at the same moment as the
+        # first maintenance cycle.
+        await asyncio.sleep(settings.janitor_interval_seconds // 2)
+        while self._running:
+            try:
+                from core.services.janitor_service import run_janitor_once
+                await run_janitor_once()
+            except Exception:
+                logger.exception("Janitor: patrol error")
+            logger.debug("Janitor sleeping %ds", settings.janitor_interval_seconds)
+            await asyncio.sleep(settings.janitor_interval_seconds)
 
 
 # Module-level singleton — imported by conversation_service and app.py
