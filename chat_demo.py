@@ -16,6 +16,11 @@ How it works:
 Type 'quit' or 'exit' to end the session.
 Type '/flush' to manually trigger a wiki flush right now.
 Type '/status' to show the current conversation window status.
+Type '/ingest' to trigger the file ingest pipeline (new/changed/failed files only).
+Type '/ingest ./docs/foo.md,./notes/bar.md' to force re-ingest specific files.
+Type '/scan' to scan all allowed dirs and process every unprocessed file.
+Type '/ingest-status' to show the current file ingest record status.
+Type '/maintenance' to manually trigger one maintenance pipeline run (orchestrator → specialists).
 """
 
 from __future__ import annotations
@@ -181,6 +186,33 @@ class WikiClient:
         r.raise_for_status()
         return r.json()
 
+    def trigger_ingest(self, force_paths: list[str] | None = None) -> dict:
+        if force_paths:
+            r = self._http.post(
+                f"{self._base}/ingest/force",
+                json={"paths": force_paths},
+                headers=self._headers,
+            )
+        else:
+            r = self._http.post(f"{self._base}/ingest", headers=self._headers)
+        r.raise_for_status()
+        return r.json()
+
+    def scan_ingest(self) -> dict:
+        r = self._http.post(f"{self._base}/ingest/scan", headers=self._headers)
+        r.raise_for_status()
+        return r.json()
+
+    def ingest_status(self) -> dict:
+        r = self._http.get(f"{self._base}/ingest/status", headers=self._headers)
+        r.raise_for_status()
+        return r.json()
+
+    def trigger_maintenance(self) -> dict:
+        r = self._http.post(f"{self._base}/maintenance/trigger", headers=self._headers)
+        r.raise_for_status()
+        return r.json()
+
     def get_window(self, window_id: str) -> dict:
         r = self._http.get(
             f"{self._base}/conversations/windows/{window_id}",
@@ -205,8 +237,13 @@ class LLMClient:
             self._http = httpx.Client(timeout=120.0)
         else:
             # Ollama
-            self._ollama_host = env.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-            self._http = httpx.Client(timeout=120.0)
+            from ollama import Client as OllamaSDK
+            ollama_host = env.get("OLLAMA_HOST", "http://localhost:11434")
+            ollama_key = env.get("OLLAMA_API_KEY", "")
+            self._ollama = OllamaSDK(
+                host=ollama_host,
+                headers={"Authorization": "Bearer " + ollama_key},
+            )
 
     def chat(self, messages: list[dict]) -> str:
         if self._provider == "openai_compat":
@@ -226,12 +263,8 @@ class LLMClient:
         return r.json()["choices"][0]["message"]["content"]
 
     def _chat_ollama(self, messages: list[dict]) -> str:
-        r = self._http.post(
-            f"{self._ollama_host}/api/chat",
-            json={"model": self._model, "messages": messages, "stream": False},
-        )
-        r.raise_for_status()
-        return r.json()["message"]["content"]
+        resp = self._ollama.chat(model=self._model, messages=messages)
+        return resp.message.content
 
     def close(self) -> None:
         self._http.close()
@@ -324,6 +357,35 @@ def run_chat(wiki_url: str, persona_path: str) -> None:
         if user_input.lower() == "/status":
             w = wiki.get_window(window_id)
             print_wiki_status(w, False)
+            continue
+
+        if user_input.lower() == "/scan":
+            result = wiki.scan_ingest()
+            print(_color(f"[wiki] {result['message']}", YELLOW))
+            continue
+
+        if user_input.lower().startswith("/ingest"):
+            parts = user_input.split(maxsplit=1)
+            force_paths = [p.strip() for p in parts[1].split(",")] if len(parts) > 1 else None
+            result = wiki.trigger_ingest(force_paths=force_paths)
+            print(_color(f"[wiki] {result['message']}", YELLOW))
+            if force_paths:
+                for p in (result.get("paths") or []):
+                    print(_color(f"  {p}", DIM))
+            continue
+
+        if user_input.lower() == "/maintenance":
+            result = wiki.trigger_maintenance()
+            print(_color(f"[wiki] {result['message']}", YELLOW))
+            continue
+
+        if user_input.lower() == "/ingest-status":
+            data = wiki.ingest_status()
+            print(_color(f"[ingest] {data['count']} record(s):", YELLOW))
+            for rec in data["records"][:20]:
+                print(_color(f"  [{rec['status']:10}] {rec['path']}", DIM))
+                if rec.get("summary"):
+                    print(_color(f"             {rec['summary'][:80]}", DIM))
             continue
 
         # Push user message to wiki

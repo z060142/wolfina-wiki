@@ -8,7 +8,7 @@ from core.models.proposal import ProposalStatus, ReviewDecision
 class ProposalCreate(BaseModel):
     # Null = create a new page.
     target_page_id: str | None = None
-    proposed_title: str = Field(..., min_length=1, max_length=512)
+    proposed_title: str | None = Field(None, min_length=1, max_length=512)
     proposed_slug: str | None = Field(
         None, min_length=1, max_length=512, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
     )

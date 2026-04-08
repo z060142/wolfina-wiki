@@ -176,6 +176,9 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .agent-card.tool_call{border-color:var(--purple);background:#100a18}
 .agent-card.done{border-color:var(--green);background:#06180e}
 .agent-card.error{border-color:var(--red);background:#180608}
+.agent-card[data-agent="director"].thinking{border-color:#d060f0;background:#100818}
+.agent-card[data-agent="director"].tool_call{border-color:#e080ff;background:#160a1e}
+.agent-card[data-agent="director"].done{border-color:#d060f0;background:#0c0616}
 .agent-row{display:flex;align-items:center;gap:8px;margin-bottom:3px}
 .agent-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--idle)}
 .agent-dot.idle{background:var(--idle)}
@@ -223,6 +226,23 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .ev-task_updated .badge{background:#0c1408;color:#60a030}
 .ev-scheduler_tick .badge{background:#0a0a1c;color:#6060c0}
 .ev-connected .badge{background:#061006;color:var(--green)}
+.ev-subagent_start .badge{background:#08101e;color:var(--blue)}
+.ev-subagent_done .badge{background:#061208;color:var(--green)}
+.ev-subagent_error .badge{background:#180606;color:var(--red)}
+.ev-ingest_pipeline_start .badge{background:#101808;color:#80c040}
+.ev-ingest_pipeline_complete .badge{background:#061408;color:var(--teal)}
+.ev-file_ingest_complete .badge{background:#061208;color:#60c070}
+.ev-file_read .badge{background:#0a0a1c;color:#6060c0}
+.ev-file_search .badge{background:#0a0a1c;color:#7070d0}
+.ev-file_list .badge{background:#0a0a1c;color:#5050b0}
+.ev-director_thinking .badge{background:#0a0818;color:#d060f0}
+.ev-director_tool_call .badge{background:#160a20;color:#e080ff}
+.ev-director_tool_result .badge{background:#120818;color:#c060d0}
+.ev-director_delegate .badge{background:#0a1020;color:#40c0ff}
+.ev-director_pipeline .badge{background:#101400;color:#d0c020}
+.ev-director_reply .badge{background:#061418;color:var(--teal)}
+.ev-director_error .badge{background:#180606;color:var(--red)}
+.ev-pipeline_triggered .badge{background:#181000;color:var(--amber)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes glow-amber{from{box-shadow:0 0 4px #f0a03060}to{box-shadow:0 0 10px #f0a03099}}
 #empty-msg{color:var(--dim);font-size:11px;padding:8px 0}
@@ -261,7 +281,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 </div>
 
 <script>
-const AGENT_TYPES = ['orchestrator','research','proposer','reviewer','executor','relation'];
+const AGENT_TYPES = ['director','orchestrator','research','proposer','reviewer','executor','relation','ingest','subagent'];
 const MAX_TIMELINE = 200;
 const MAX_PROPOSALS = 12;
 const MAX_TASKS = 15;
@@ -319,7 +339,7 @@ function renderAgents() {
     const a = state.agents[t];
     const st = a.status || 'idle';
     const hasAction = st !== 'idle';
-    return `<div class="agent-card ${esc(st)}">
+    return `<div class="agent-card ${esc(st)}" data-agent="${t}">
       <div class="agent-row">
         <div class="agent-dot ${esc(st)}"></div>
         <div class="agent-name">${t}</div>
@@ -410,12 +430,29 @@ function buildDetail(ev) {
     case 'agent_tool_result': return `${ev.agent_type} ← ${ev.tool}  ${ev.ok?'ok':'ERROR'} ${(ev.result_preview||'').slice(0,60)}`;
     case 'agent_done': return `${ev.agent_type} batch=${shortBatch(ev.batch_id)} "${(ev.result_preview||'').slice(0,60)}"`;
     case 'agent_error': return `${ev.agent_type} iter=${ev.iteration}`;
+    case 'subagent_start': return `task=${ev.task_id}`;
+    case 'subagent_done': return `task=${ev.task_id} "${(ev.result_preview||'').slice(0,80)}"`;
+    case 'subagent_error': return `task=${ev.task_id} ${ev.error||''}`;
+    case 'ingest_pipeline_start': return `batch=${shortBatch(ev.batch_id)} force=${JSON.stringify(ev.force_paths||null)}`;
+    case 'ingest_pipeline_complete': return `batch=${shortBatch(ev.batch_id)} proposed=${ev.proposed??''}`;
+    case 'file_ingest_complete': return `record=${ev.record_id} outcome=${ev.outcome||''}`;
+    case 'file_read': return `${ev.path} lines=${ev.lines} offset=${ev.offset}`;
+    case 'file_search': return `${ev.path} pattern=${ev.pattern} matches=${ev.matches}`;
+    case 'file_list': return `pattern=${ev.pattern} count=${ev.count}`;
     case 'proposal_created': return `[${shortId(ev.proposal_id)}] "${ev.title||''}" by ${shortId(ev.proposer||ev.proposer_agent_id)} batch=${shortBatch(ev.batch_id)}`;
     case 'proposal_reviewed': return `[${shortId(ev.proposal_id)}] ${ev.decision} by ${shortId(ev.reviewer)} → ${ev.status}`;
     case 'proposal_applied': return `[${shortId(ev.proposal_id)}] → page=${shortId(ev.page_id)} by ${shortId(ev.executor)}`;
     case 'task_created': return `[${shortId(ev.task_id)}] ${ev.agent_type}: ${(ev.instruction||'').slice(0,60)}`;
     case 'task_updated': return `[${shortId(ev.task_id)}] ${ev.agent_type} → ${ev.status}`;
     case 'scheduler_tick': return `rate=${ev.flush_rate} interval=${ev.current_interval}s`;
+    case 'director_thinking': return `director iter=${ev.iteration}`;
+    case 'director_tool_call': return `director → ${ev.tool}  ${JSON.stringify(ev.args||{}).slice(0,80)}`;
+    case 'director_tool_result': return `director ← ${ev.tool}  ${ev.ok?'ok':'ERROR'}  ${(ev.preview||'').slice(0,60)}`;
+    case 'director_delegate': return `director >> [${ev.agent_type}] ${(ev.instruction||'').slice(0,80)}`;
+    case 'director_pipeline': return `director >> pipeline: ${ev.pipeline_type}`;
+    case 'director_reply': return `director reply: "${(ev.text||'').slice(0,100)}"`;
+    case 'director_error': return `director ERROR: ${ev.message||''}`;
+    case 'pipeline_triggered': return `pipeline: ${ev.pipeline_type} (source=${ev.source||'?'})`;
     default: return JSON.stringify(ev).slice(0,120);
   }
 }
@@ -495,6 +532,60 @@ function handleEvent(ev) {
       state.agents[ev.agent_type].status = 'error';
       state.agents[ev.agent_type].action = 'error';
     }
+    renderAgents(); return;
+  }
+  if (t === 'subagent_start') {
+    state.agents['subagent'] = { status: 'thinking', action: `task: ${ev.task_id}`, args: '', iter: 0, batch_id: '' };
+    renderAgents(); return;
+  }
+  if (t === 'subagent_done') {
+    state.agents['subagent'] = { status: 'done', action: `done: ${(ev.result_preview||'').slice(0,60)}`, args: '', iter: 0, batch_id: '' };
+    renderAgents();
+    setTimeout(() => {
+      if (state.agents['subagent'] && state.agents['subagent'].status === 'done') {
+        state.agents['subagent'] = { status: 'idle', action: '', args: '', iter: 0, batch_id: '' };
+        renderAgents();
+      }
+    }, 4000);
+    return;
+  }
+  if (t === 'subagent_error') {
+    state.agents['subagent'] = { status: 'error', action: `error: ${(ev.error||'').slice(0,60)}`, args: '', iter: 0, batch_id: '' };
+    renderAgents(); return;
+  }
+  if (t === 'director_thinking') {
+    state.agents['director'] = { status: 'thinking', action: `thinking (iter ${ev.iteration})`, args: '', iter: ev.iteration||0, batch_id: '' };
+    renderAgents(); return;
+  }
+  if (t === 'director_tool_call') {
+    state.agents['director'] = { status: 'tool_call', action: `→ ${ev.tool}`, args: JSON.stringify(ev.args||{}).slice(0,100), iter: state.agents['director']?.iter||0, batch_id: '' };
+    renderAgents(); return;
+  }
+  if (t === 'director_tool_result') {
+    state.agents['director'] = { status: ev.ok ? 'thinking' : 'error', action: `← ${ev.tool} ${ev.ok?'ok':'ERROR'}`, args: (ev.preview||'').slice(0,100), iter: state.agents['director']?.iter||0, batch_id: '' };
+    renderAgents(); return;
+  }
+  if (t === 'director_delegate') {
+    state.agents['director'] = { status: 'tool_call', action: `>> [${ev.agent_type}] ${(ev.instruction||'').slice(0,60)}`, args: '', iter: state.agents['director']?.iter||0, batch_id: '' };
+    renderAgents(); return;
+  }
+  if (t === 'director_pipeline') {
+    state.agents['director'] = { status: 'tool_call', action: `>> pipeline: ${ev.pipeline_type}`, args: '', iter: state.agents['director']?.iter||0, batch_id: '' };
+    renderAgents(); return;
+  }
+  if (t === 'director_reply') {
+    state.agents['director'] = { status: 'done', action: `reply: "${(ev.text||'').slice(0,60)}"`, args: '', iter: 0, batch_id: '' };
+    renderAgents();
+    setTimeout(() => {
+      if (state.agents['director'] && state.agents['director'].status === 'done') {
+        state.agents['director'] = { status: 'idle', action: '', args: '', iter: 0, batch_id: '' };
+        renderAgents();
+      }
+    }, 6000);
+    return;
+  }
+  if (t === 'director_error') {
+    state.agents['director'] = { status: 'error', action: `error: ${(ev.message||'').slice(0,60)}`, args: '', iter: 0, batch_id: '' };
     renderAgents(); return;
   }
   if (t === 'proposal_created') {

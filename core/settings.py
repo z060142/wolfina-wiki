@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     executor_agent_model: str = ""
     relation_agent_model: str = ""
     orchestrator_agent_model: str = ""
+    ingest_agent_model: str = ""
 
     # ── Agent identity IDs ────────────────────────────────────────────────────
     research_agent_id: str = "wiki-research"
@@ -40,6 +41,12 @@ class Settings(BaseSettings):
     executor_agent_id: str = "wiki-executor"
     relation_agent_id: str = "wiki-relation"
     orchestrator_agent_id: str = "wiki-orchestrator"
+    ingest_agent_id: str = "wiki-ingest"
+    director_agent_id: str = "wiki-director"
+
+    # ── Per-agent model overrides (continued) ─────────────────────────────────
+    director_agent_model: str = ""
+    quick_query_agent_model: str = ""
 
     # ── Conversation flush thresholds ─────────────────────────────────────────
     flush_max_messages: int = 50         # flush after N messages
@@ -54,6 +61,21 @@ class Settings(BaseSettings):
 
     # Max LLM tool-loop iterations per agent run (safety limit)
     agent_max_iterations: int = 20
+
+    # ── Ollama chat_template_kwargs ───────────────────────────────────────────
+    # Set to true to pass {"thinking": False} in extra_body so models that
+    # support extended thinking (e.g. Qwen3, Kimi-K2) skip the thinking phase.
+    ollama_disable_thinking: bool = False
+
+    # ── File read tool ────────────────────────────────────────────────────────
+    # Comma-separated list of directories the LLM is allowed to read from.
+    # Relative paths are resolved relative to the process working directory.
+    # Empty string = feature disabled (no file reads allowed).
+    # Example: FILE_READ_ALLOWED_DIRS=./docs,./data,/etc/myapp/config
+    file_read_allowed_dirs: str = ""
+
+    # Maximum file size (bytes) the read_file tool will return (default 128 KB).
+    file_read_max_bytes: int = 131072
 
 
 settings = Settings()

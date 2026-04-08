@@ -121,13 +121,29 @@ class DynamicScheduler:
             flush_rate=self.flush_rate(),
             current_interval=self._calculate_interval(),
         )
-        from core.services.agent_service import run_maintenance_pipeline
+        from core.services.agent_service import run_ingest_pipeline, run_maintenance_pipeline
+
+        from core.services.conversation_service import flush_pending_windows
+        try:
+            triggered = await flush_pending_windows()
+            if triggered:
+                logger.info("Scheduler: flushed %d pending window(s)", triggered)
+        except Exception:
+            logger.exception("Scheduler: flush scan error")
 
         async with AsyncSessionLocal() as db:
             try:
                 await run_maintenance_pipeline(db)
             except Exception:
                 logger.exception("Scheduler: maintenance pipeline error")
+
+        # Run ingest pipeline only when FILE_READ_ALLOWED_DIRS is configured
+        if settings.file_read_allowed_dirs.strip():
+            async with AsyncSessionLocal() as db:
+                try:
+                    await run_ingest_pipeline(db)
+                except Exception:
+                    logger.exception("Scheduler: ingest pipeline error")
 
 
 # Module-level singleton — imported by conversation_service and app.py

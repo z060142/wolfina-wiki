@@ -1,0 +1,10 @@
+{
+  "_comment": "Wolf Chat bridge plugin configuration",
+  "bot_display_name": "Wolfina Vally",
+  "bot_role_label": "chatbot",
+  "player_role_label": "player",
+  "query_cache_ttl_seconds": 600,
+  "query_max_words": 500,
+  "conversation_window_source_id": "wolfchat",
+  "query_summary_instruction": "Summarize this person's personal introduction, behavioral patterns, notable events, and relationships with other people based only on documented wiki content. State only facts — no analysis, no speculation, no filler. If no data exists for the user, say clearly: 'No data found for this user.' Maximum 500 words."
+}

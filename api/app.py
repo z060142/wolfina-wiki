@@ -20,6 +20,10 @@ async def lifespan(app: FastAPI):
     import_models()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Enable WAL mode so concurrent readers don't block the writer.
+        await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+        # NORMAL is safe with WAL and avoids fsync on every commit.
+        await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
 
     # Start the background maintenance scheduler.
     from core.services.scheduler_service import scheduler
@@ -70,6 +74,11 @@ def create_app() -> FastAPI:
     from api.routers.proposals import router as proposals_router
     from api.routers.conversations import router as conversations_router
     from api.routers.debug import router as debug_router
+    from api.routers.ingest import router as ingest_router
+    from api.routers.director import router as director_router
+    from api.routers.query import router as query_router
+    from api.routers.maintenance import router as maintenance_router
+    from plugins.wolfchat.router import router as wolfchat_router
 
     app.include_router(pages_router)
     app.include_router(proposals_router)
@@ -77,6 +86,11 @@ def create_app() -> FastAPI:
     app.include_router(events_router)
     app.include_router(conversations_router)
     app.include_router(debug_router)
+    app.include_router(ingest_router)
+    app.include_router(director_router)
+    app.include_router(query_router)
+    app.include_router(maintenance_router)
+    app.include_router(wolfchat_router)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict:
