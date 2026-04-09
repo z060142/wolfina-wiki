@@ -321,6 +321,7 @@ async def run_director_turn(
     max_iter = settings.agent_max_iterations
 
     final_text = ""
+    tool_results: list[dict[str, Any]] = []
     # Track new messages added this turn (to persist)
     new_messages: list[dict] = [{"role": "user", "content": user_message}]
 
@@ -333,7 +334,7 @@ async def run_director_turn(
             break
 
         if resp.finish_reason != "tool_calls" or not resp.tool_calls:
-            final_text = resp.text or ""
+            final_text = (resp.text or "").strip()
             break
 
         # Build assistant tool-call message
@@ -385,6 +386,7 @@ async def run_director_turn(
                 "ok": ok,
                 "preview": result_str[:200] + ("…" if len(result_str) > 200 else ""),
             })
+            tool_results.append({"tool": tc.name, "ok": ok, "result": result})
 
             tool_msg: dict[str, Any] = {
                 "role": "tool",
@@ -397,6 +399,42 @@ async def run_director_turn(
 
     else:
         logger.warning("Director reached max_iterations (%d)", max_iter)
+
+    if not final_text:
+        # Some providers can end a tool loop without producing a final assistant
+        # message. Force one non-tool synthesis turn so users always get a reply
+        # based on concrete tool outcomes from this turn.
+        forced_history = history + [{
+            "role": "system",
+            "content": (
+                "You already have all tool outputs for this turn. "
+                "Do NOT call tools now. Reply to the user immediately with: "
+                "(1) what was completed, (2) what failed, and (3) next steps."
+            ),
+        }]
+        forced = await client.chat(model=model, messages=forced_history, tools=[])
+        final_text = (forced.text or "").strip()
+
+    if not final_text:
+        # Last-resort fallback to avoid silent turns in the CLI/SSE stream.
+        failed = [r for r in tool_results if not r["ok"]]
+        succeeded = [r["tool"] for r in tool_results if r["ok"]]
+        if failed:
+            failed_tools = ", ".join(sorted({r["tool"] for r in failed}))
+            final_text = (
+                "我已執行工具，但有部分步驟失敗。"
+                f"失敗工具：{failed_tools}。"
+                "請讓我重試或提供更具體條件，我會繼續完成。"
+            )
+        elif succeeded:
+            done_tools = ", ".join(sorted(set(succeeded)))
+            final_text = (
+                "我已完成這一輪工具執行並取得結果，"
+                f"涉及工具：{done_tools}。"
+                "如需我繼續下一步，我可以直接接續處理。"
+            )
+        else:
+            final_text = "我已收到你的請求，但這一輪沒有成功產生可回覆內容。請再試一次。"
 
     # Append final assistant reply to persistent history
     if final_text:
