@@ -863,6 +863,128 @@ TOOLS: list[dict] = [
             },
         },
     },
+    # ── 23 ── output_md_write ─────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "output_md_write",
+            "description": (
+                "Write markdown files under ./output only. Supports one-shot writes or "
+                "incremental updates: overwrite whole file, append to file, replace a named "
+                "section block, or append to a named section block."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path under ./output, must end with .md. Example: reports/week-1.md",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["overwrite", "append", "replace_section", "append_section"],
+                        "description": (
+                            "overwrite: replace full file. append: append to end. "
+                            "replace_section/append_section: operate on <!-- BEGIN:section --> blocks."
+                        ),
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "Required for section modes. Section identifier (e.g., executive-summary).",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Markdown content to write.",
+                    },
+                },
+                "required": ["path", "mode", "content"],
+            },
+        },
+    },
+    # ── 24 ── output_md_copy_page ────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "output_md_copy_page",
+            "description": (
+                "Copy an existing wiki page into a markdown file under ./output. "
+                "You can choose which fields to include and where to place it "
+                "(whole file append/overwrite, or named section block)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path under ./output, must end with .md.",
+                    },
+                    "page_id": {"type": "string", "description": "Page UUID (optional if slug is provided)."},
+                    "slug": {"type": "string", "description": "Page slug (optional if page_id is provided)."},
+                    "include_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Subset of: title, slug, summary, content. Defaults to all fields.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["overwrite", "append", "replace_section", "append_section"],
+                        "description": "Write strategy. Defaults to append.",
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "Section identifier for section modes.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    # ── 25 ── output_md_copy_task ────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "output_md_copy_task",
+            "description": (
+                "Copy an agent task's output context into ./output markdown. "
+                "Includes task metadata, instruction, context_json, and error message (if any). "
+                "Useful when Director wants to assemble reports from delegated work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path under ./output, must end with .md.",
+                    },
+                    "task_id": {"type": "string", "description": "AgentTask UUID to copy from."},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["overwrite", "append", "replace_section", "append_section"],
+                        "description": "Write strategy. Defaults to append.",
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "Section identifier for section modes.",
+                    },
+                },
+                "required": ["path", "task_id"],
+            },
+        },
+    },
+    # ── 26 ── output_md_list ──────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "output_md_list",
+            "description": "List markdown files currently under ./output.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max number of files. Default 50, max 200."},
+                },
+            },
+        },
+    },
     # ── 18 ── complete_file_ingest ────────────────────────────────────────────
     {
         "type": "function",
@@ -973,6 +1095,10 @@ AGENT_TOOLS: dict[str, list[str]] = {
         "trigger_pipeline",
         "manage_todo",
         "manage_note",
+        "output_md_write",
+        "output_md_copy_page",
+        "output_md_copy_task",
+        "output_md_list",
     ],
 }
 

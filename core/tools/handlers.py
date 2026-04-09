@@ -687,6 +687,212 @@ async def _quick_query(inp: dict, db: AsyncSession) -> dict:
     return {"summary": summary, "sources": sources}
 
 
+def _resolve_output_md_path(raw_path: str) -> pathlib.Path | None:
+    """Resolve a path under ./output and enforce `.md` extension."""
+    base_dir = (pathlib.Path.cwd() / "output").resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    requested = pathlib.Path(raw_path.strip())
+    if not requested.name:
+        return None
+
+    if requested.is_absolute():
+        # Absolute paths are allowed only if they are still inside ./output.
+        resolved = requested.resolve()
+    else:
+        resolved = (base_dir / requested).resolve()
+
+    if not (resolved == base_dir or base_dir in resolved.parents):
+        return None
+    if resolved.suffix.lower() != ".md":
+        return None
+    return resolved
+
+
+def _upsert_section(content: str, section: str, payload: str, *, append: bool) -> str:
+    """Replace or append content inside a named fenced section marker."""
+    start_marker = f"<!-- BEGIN:{section} -->"
+    end_marker = f"<!-- END:{section} -->"
+    start = content.find(start_marker)
+    if start == -1:
+        block = f"{start_marker}\n{payload.rstrip()}\n{end_marker}\n"
+        if not content.strip():
+            return block
+        return content.rstrip() + "\n\n" + block
+
+    end = content.find(end_marker, start + len(start_marker))
+    if end == -1:
+        # Broken section markers: rewrite from start marker to EOF.
+        prefix = content[:start]
+        block = f"{start_marker}\n{payload.rstrip()}\n{end_marker}\n"
+        return prefix.rstrip() + "\n\n" + block if prefix.strip() else block
+
+    body_start = start + len(start_marker)
+    old_body = content[body_start:end]
+    if append:
+        merged_body = old_body.rstrip("\n") + ("\n" if old_body.strip() else "") + payload.rstrip() + "\n"
+    else:
+        merged_body = "\n" + payload.rstrip() + "\n"
+    return content[:body_start] + merged_body + content[end:]
+
+
+async def _output_md_write(inp: dict, db: AsyncSession) -> dict:
+    path_value = inp.get("path", "")
+    resolved = _resolve_output_md_path(path_value)
+    if resolved is None:
+        return {"error": "Invalid path. Must be a .md file inside ./output."}
+
+    mode = inp.get("mode", "overwrite")
+    content = inp.get("content", "")
+    section = (inp.get("section") or "").strip()
+
+    if not isinstance(content, str):
+        return {"error": "content must be a string."}
+    if mode not in {"overwrite", "append", "replace_section", "append_section"}:
+        return {"error": f"Unknown mode: {mode}"}
+    if mode in {"replace_section", "append_section"} and not section:
+        return {"error": "section is required for section-based modes."}
+
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    old_content = resolved.read_text(encoding="utf-8") if resolved.exists() else ""
+
+    if mode == "overwrite":
+        new_content = content
+    elif mode == "append":
+        if old_content and not old_content.endswith("\n"):
+            old_content += "\n"
+        new_content = old_content + content
+    elif mode == "replace_section":
+        new_content = _upsert_section(old_content, section, content, append=False)
+    else:  # append_section
+        new_content = _upsert_section(old_content, section, content, append=True)
+
+    resolved.write_text(new_content, encoding="utf-8")
+    debug_stream.emit(
+        "output_md_write",
+        path=str(resolved),
+        mode=mode,
+        section=section or None,
+        bytes=len(new_content.encode("utf-8")),
+    )
+    return {
+        "path": str(resolved),
+        "mode": mode,
+        "section": section or None,
+        "bytes_written": len(new_content.encode("utf-8")),
+        "char_count": len(new_content),
+    }
+
+
+async def _output_md_copy_page(inp: dict, db: AsyncSession) -> dict:
+    path_value = inp.get("path", "")
+    resolved = _resolve_output_md_path(path_value)
+    if resolved is None:
+        return {"error": "Invalid path. Must be a .md file inside ./output."}
+
+    if inp.get("page_id"):
+        page = await page_service.get_page(db, inp["page_id"])
+    elif inp.get("slug"):
+        page = await page_service.get_page_by_slug(db, inp["slug"])
+    else:
+        return {"error": "Provide either page_id or slug."}
+
+    include_fields = inp.get("include_fields") or ["title", "slug", "summary", "content"]
+    allowed = {"title", "slug", "summary", "content"}
+    fields = [f for f in include_fields if f in allowed]
+    if not fields:
+        return {"error": "include_fields has no valid values."}
+
+    lines: list[str] = []
+    if "title" in fields:
+        lines.append(f"# {page.title}")
+    if "slug" in fields:
+        lines.append(f"- slug: `{page.slug}`")
+    if "summary" in fields:
+        lines.append("\n## Summary\n")
+        lines.append(page.summary or "")
+    if "content" in fields:
+        lines.append("\n## Content\n")
+        lines.append(page.content or "")
+    payload = "\n".join(lines).strip() + "\n"
+
+    write_inp = {
+        "path": path_value,
+        "mode": inp.get("mode", "append"),
+        "section": inp.get("section"),
+        "content": payload,
+    }
+    result = await _output_md_write(write_inp, db)
+    if "error" in result:
+        return result
+    result["copied_from"] = {"page_id": page.id, "slug": page.slug}
+    return result
+
+
+async def _output_md_copy_task(inp: dict, db: AsyncSession) -> dict:
+    from sqlalchemy import select
+
+    path_value = inp.get("path", "")
+    resolved = _resolve_output_md_path(path_value)
+    if resolved is None:
+        return {"error": "Invalid path. Must be a .md file inside ./output."}
+
+    task = await db.scalar(select(AgentTask).where(AgentTask.id == inp.get("task_id", "")))
+    if task is None:
+        return {"error": f"Task '{inp.get('task_id')}' not found."}
+
+    lines = [
+        f"## Task {task.id}",
+        f"- agent_type: `{task.agent_type}`",
+        f"- status: `{task.status}`",
+        "",
+        "### Instruction",
+        task.instruction or "",
+    ]
+    if task.context_json:
+        lines.extend(["", "### Context JSON", "```json", task.context_json, "```"])
+    if task.error_message:
+        lines.extend(["", "### Error", task.error_message])
+    payload = "\n".join(lines).strip() + "\n"
+
+    write_inp = {
+        "path": path_value,
+        "mode": inp.get("mode", "append"),
+        "section": inp.get("section"),
+        "content": payload,
+    }
+    result = await _output_md_write(write_inp, db)
+    if "error" in result:
+        return result
+    result["copied_from"] = {"task_id": task.id, "agent_type": task.agent_type, "status": task.status}
+    return result
+
+
+async def _output_md_list(inp: dict, db: AsyncSession) -> dict:
+    base_dir = (pathlib.Path.cwd() / "output").resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    limit = min(max(1, int(inp.get("limit", 50))), 200)
+
+    files: list[dict] = []
+    for p in base_dir.rglob("*.md"):
+        if not p.is_file():
+            continue
+        files.append(
+            {
+                "path": str(p),
+                "relative_path": str(p.relative_to(base_dir)),
+                "size": p.stat().st_size,
+                "updated_at": datetime.fromtimestamp(
+                    p.stat().st_mtime, tz=timezone.utc
+                ).isoformat(),
+            }
+        )
+        if len(files) >= limit:
+            break
+
+    return {"base_dir": str(base_dir), "count": len(files), "files": files}
+
+
 async def _trigger_pipeline(inp: dict, db: AsyncSession) -> dict:
     import asyncio
     from core.db.base import AsyncSessionLocal
@@ -749,6 +955,10 @@ _HANDLERS: dict[str, Any] = {
     "spawn_subagents": _spawn_subagents,
     "quick_query": _quick_query,
     "trigger_pipeline": _trigger_pipeline,
+    "output_md_write": _output_md_write,
+    "output_md_copy_page": _output_md_copy_page,
+    "output_md_copy_task": _output_md_copy_task,
+    "output_md_list": _output_md_list,
     # manage_todo is handled directly in director_service, not via dispatch_tool
 }
 

@@ -100,6 +100,13 @@ multi-agent pipeline to fulfil them.
   when you just need a quick factual answer.
 - list_agent_tasks(status="pending"): Check what's still waiting to be processed.
 - list_proposals(status="pending"): See proposals awaiting review.
+- output_md_write / output_md_copy_page / output_md_copy_task / output_md_list:
+  Use these to produce director-facing markdown deliverables under ./output.
+  - Only .md files are allowed.
+  - Use overwrite for one-shot reports.
+  - Use append/append_section for iterative, chunked writing across multiple turns.
+  - Use output_md_copy_page to embed canonical wiki entries.
+  - Use output_md_copy_task to pull delegated task outputs into a report.
 
 == TODO LIST ==
 Use manage_todo to track active work items. The list holds up to 10 items.
