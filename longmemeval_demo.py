@@ -49,6 +49,7 @@ OFFICIAL_FILES = {
 }
 
 MAX_STAGE_CHARS = int(os.environ.get("LONGMEMEVAL_MAX_STAGE_CHARS", "5000"))
+WINDOW_COOLDOWN_SECONDS = float(os.environ.get("LONGMEMEVAL_WINDOW_COOLDOWN_SECONDS", "1.5"))
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -97,16 +98,28 @@ class WikiClient:
         return resp.json()
 
     def add_message(self, window_id: str, role: str, content: str) -> None:
-        resp = self._http.post(
-            f"{self._base}/conversations/windows/{window_id}/messages",
-            json={"role": role, "content": content},
-            headers=self._headers,
-        )
-        resp.raise_for_status()
+        for attempt in range(7):
+            resp = self._http.post(
+                f"{self._base}/conversations/windows/{window_id}/messages",
+                json={"role": role, "content": content},
+                headers=self._headers,
+            )
+            if resp.status_code == 409:
+                time.sleep(min(8.0, 0.5 * (2 ** attempt)))
+                continue
+            resp.raise_for_status()
+            return
+        raise RuntimeError(f"add_message 連續衝突失敗: window={window_id}")
 
     def flush(self, window_id: str) -> None:
-        resp = self._http.post(f"{self._base}/conversations/windows/{window_id}/flush", headers=self._headers)
-        resp.raise_for_status()
+        for attempt in range(7):
+            resp = self._http.post(f"{self._base}/conversations/windows/{window_id}/flush", headers=self._headers)
+            if resp.status_code == 409:
+                time.sleep(min(8.0, 0.5 * (2 ** attempt)))
+                continue
+            resp.raise_for_status()
+            return
+        raise RuntimeError(f"flush 連續衝突失敗: window={window_id}")
 
     def get_window(self, window_id: str) -> dict[str, Any]:
         resp = self._http.get(f"{self._base}/conversations/windows/{window_id}", headers=self._headers)
@@ -279,6 +292,8 @@ def install_dataset_to_wiki(wiki: WikiClient, dataset_path: Path, limit: int | N
                 wiki.add_message(window_id, msg["role"], msg["content"])
             wiki.flush(window_id)
             wait_for_flush_complete(wiki, window_id)
+            # 放慢節奏，讓伺服器有時間把 window 狀態穩定回 active/cleared
+            time.sleep(WINDOW_COOLDOWN_SECONDS)
         print(_c(f"  - ingested {qid} with {len(stages)} stages", DIM))
 
 
