@@ -48,7 +48,7 @@ OFFICIAL_FILES = {
     "longmemeval_m_cleaned.json": f"{HF_BASE}/longmemeval_m_cleaned.json",
 }
 
-MAX_STAGE_CHARS = int(os.environ.get("LONGMEMEVAL_MAX_STAGE_CHARS", "12000"))
+MAX_STAGE_CHARS = int(os.environ.get("LONGMEMEVAL_MAX_STAGE_CHARS", "5000"))
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -170,12 +170,16 @@ def ensure_repo() -> Path:
     return REPO_DIR
 
 
-def download_official_datasets() -> list[Path]:
+def download_official_datasets(force: bool = False) -> list[Path]:
     ensure_repo()
     saved: list[Path] = []
     with httpx.Client(timeout=120.0, follow_redirects=True) as client:
         for filename, url in OFFICIAL_FILES.items():
             target = DATA_DIR / filename
+            if target.exists() and not force:
+                print(_c(f"[dataset] skip existing {filename}", DIM))
+                saved.append(target)
+                continue
             print(_c(f"[dataset] download {filename}", CYAN))
             resp = client.get(url)
             resp.raise_for_status()
