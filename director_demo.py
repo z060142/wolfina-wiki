@@ -109,6 +109,10 @@ _TOOL_ICONS = {
     "spawn_subagents":    "subagents",
     "trigger_pipeline":   "pipeline",
     "manage_todo":        "todo",
+    "output_md_write":    "write_md",
+    "output_md_copy_page":"copy_page_md",
+    "output_md_copy_task":"copy_task_md",
+    "output_md_list":     "list_md",
 }
 
 _AGENT_COLOURS = {
