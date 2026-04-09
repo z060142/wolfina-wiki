@@ -24,6 +24,13 @@ async def lifespan(app: FastAPI):
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         # NORMAL is safe with WAL and avoids fsync on every commit.
         await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+        # Schema migration: add retry_count to agent_tasks if it doesn't exist yet.
+        try:
+            await conn.exec_driver_sql(
+                "ALTER TABLE agent_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # column already present
 
     # Start the background maintenance scheduler.
     from core.services.scheduler_service import scheduler

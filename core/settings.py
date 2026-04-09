@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     # Max LLM tool-loop iterations per agent run (safety limit)
     agent_max_iterations: int = 20
 
+    # ── Task Janitor ──────────────────────────────────────────────────────────
+    # How often the janitor patrol runs (independent of the maintenance pipeline).
+    janitor_interval_seconds: int = 120          # 2 min
+    # Tasks stuck in `running` longer than this are assumed crashed and re-queued.
+    janitor_running_timeout_minutes: int = 5
+    # Pending tasks older than this with no active maintenance run → nudge the scheduler.
+    janitor_pending_timeout_minutes: int = 10
+    # Max times the janitor will re-queue a failed task before giving up.
+    janitor_max_task_retries: int = 3
+    # Done/failed tasks older than this are deleted to prevent DB bloat.
+    janitor_task_retention_days: int = 7
+
     # ── Ollama chat_template_kwargs ───────────────────────────────────────────
     # Set to true to pass {"thinking": False} in extra_body so models that
     # support extended thinking (e.g. Qwen3, Kimi-K2) skip the thinking phase.
