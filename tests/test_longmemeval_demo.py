@@ -4,6 +4,7 @@ from longmemeval_demo import (
     build_question_prompt,
     build_staged_history_chunks,
     flatten_session,
+    iter_flush_batches,
     segment_haystack_sessions,
     stage_profile_for_dataset,
 )
@@ -67,3 +68,13 @@ def test_build_question_prompt_contains_key_fields() -> None:
     assert "q1" in prompt
     assert "2024-10-01" in prompt
     assert "What did I eat?" in prompt
+
+
+def test_iter_flush_batches_respects_limits() -> None:
+    turns = [
+        {"role": "user", "content": "A" * 1000},
+        {"role": "assistant", "content": "B" * 1000},
+        {"role": "user", "content": "C" * 1000},
+    ]
+    batches = iter_flush_batches(turns, max_chars=1500, max_turns=2)
+    assert len(batches) == 3

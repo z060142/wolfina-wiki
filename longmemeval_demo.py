@@ -52,6 +52,9 @@ MAX_STAGE_CHARS = int(os.environ.get("LONGMEMEVAL_MAX_STAGE_CHARS", "5000"))
 WINDOW_COOLDOWN_SECONDS = float(os.environ.get("LONGMEMEVAL_WINDOW_COOLDOWN_SECONDS", "1.5"))
 MESSAGE_COOLDOWN_SECONDS = float(os.environ.get("LONGMEMEVAL_MESSAGE_COOLDOWN_SECONDS", "0.2"))
 RECORD_COOLDOWN_SECONDS = float(os.environ.get("LONGMEMEVAL_RECORD_COOLDOWN_SECONDS", "0.8"))
+FLUSH_MAX_CHARS = int(os.environ.get("LONGMEMEVAL_FLUSH_MAX_CHARS", "5000"))
+FLUSH_MAX_TURNS = int(os.environ.get("LONGMEMEVAL_FLUSH_MAX_TURNS", "10"))
+MAX_CONCURRENT_FLUSHES = int(os.environ.get("LONGMEMEVAL_MAX_CONCURRENT_FLUSHES", "1"))
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -99,7 +102,7 @@ class WikiClient:
         resp.raise_for_status()
         return resp.json()
 
-    def add_message(self, window_id: str, role: str, content: str) -> None:
+    def add_message(self, window_id: str, role: str, content: str) -> dict[str, Any]:
         for attempt in range(7):
             resp = self._http.post(
                 f"{self._base}/conversations/windows/{window_id}/messages",
@@ -110,7 +113,7 @@ class WikiClient:
                 time.sleep(min(8.0, 0.5 * (2 ** attempt)))
                 continue
             resp.raise_for_status()
-            return
+            return resp.json()
         raise RuntimeError(f"add_message 連續衝突失敗: window={window_id}")
 
     def flush(self, window_id: str) -> None:
@@ -125,6 +128,14 @@ class WikiClient:
 
     def get_window(self, window_id: str) -> dict[str, Any]:
         resp = self._http.get(f"{self._base}/conversations/windows/{window_id}", headers=self._headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_windows(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        resp = self._http.get(f"{self._base}/conversations/windows", headers=self._headers, params=params)
         resp.raise_for_status()
         return resp.json()
 
@@ -342,6 +353,35 @@ def segment_haystack_sessions(record: dict[str, Any], sessions_per_stage: int) -
     return stage_turns
 
 
+def iter_flush_batches(
+    turns: list[dict[str, str]],
+    *,
+    max_chars: int = FLUSH_MAX_CHARS,
+    max_turns: int = FLUSH_MAX_TURNS,
+) -> list[list[dict[str, str]]]:
+    batches: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    char_count = 0
+    turn_count = 0
+
+    for msg in turns:
+        msg_chars = len(msg.get("content", ""))
+        need_split = current and (char_count + msg_chars > max_chars or turn_count >= max_turns)
+        if need_split:
+            batches.append(current)
+            current = []
+            char_count = 0
+            turn_count = 0
+
+        current.append(msg)
+        char_count += msg_chars
+        turn_count += 1
+
+    if current:
+        batches.append(current)
+    return batches
+
+
 def wait_for_flush_complete(wiki: WikiClient, window_id: str, timeout_seconds: int = 300) -> None:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
@@ -352,6 +392,20 @@ def wait_for_flush_complete(wiki: WikiClient, window_id: str, timeout_seconds: i
     raise TimeoutError(f"window {window_id} flush timeout")
 
 
+def wait_for_flush_slot(
+    wiki: WikiClient,
+    max_concurrent_flushes: int = MAX_CONCURRENT_FLUSHES,
+    timeout_seconds: int = 300,
+) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        flushing = wiki.list_windows(status="flushing", limit=200)
+        if len(flushing) < max_concurrent_flushes:
+            return
+        time.sleep(1.0)
+    raise TimeoutError("等待 flush slot 超時")
+
+
 def install_dataset_to_wiki(wiki: WikiClient, dataset_path: Path, limit: int | None = None) -> None:
     profile = stage_profile_for_dataset(dataset_path)
     print(_c(f"[dataset] {dataset_path.name} -> {profile.name}, sessions/stage={profile.sessions_per_stage}", CYAN))
@@ -360,15 +414,25 @@ def install_dataset_to_wiki(wiki: WikiClient, dataset_path: Path, limit: int | N
         qid = str(rec.get("question_id") or f"q-{ridx}")
         stages = segment_haystack_sessions(rec, sessions_per_stage=profile.sessions_per_stage)
         for sidx, turns in enumerate(stages, start=1):
-            window = wiki.create_window(source_id=f"longmemeval:{dataset_path.stem}:{qid}:stage-{sidx}")
+            # 每個 stage 使用不同 source_id，避免同 source 長時間聚合在同窗口
+            window = wiki.create_window(source_id=f"longmemeval:{dataset_path.stem}:{qid}:stage-{sidx}:{int(time.time())}")
             window_id = window["id"]
-            for msg in turns:
-                wiki.add_message(window_id, msg["role"], msg["content"])
-                time.sleep(MESSAGE_COOLDOWN_SECONDS)
-            wiki.flush(window_id)
-            wait_for_flush_complete(wiki, window_id)
-            # 放慢節奏，讓伺服器有時間把 window 狀態穩定回 active/cleared
-            time.sleep(WINDOW_COOLDOWN_SECONDS)
+            batches = iter_flush_batches(turns, max_chars=FLUSH_MAX_CHARS, max_turns=FLUSH_MAX_TURNS)
+            for bidx, batch in enumerate(batches, start=1):
+                wait_for_flush_slot(wiki, max_concurrent_flushes=MAX_CONCURRENT_FLUSHES)
+                flush_triggered = False
+                for msg in batch:
+                    result = wiki.add_message(window_id, msg["role"], msg["content"])
+                    flush_triggered = flush_triggered or bool(result.get("flush_triggered"))
+                    time.sleep(MESSAGE_COOLDOWN_SECONDS)
+                if flush_triggered:
+                    wait_for_flush_complete(wiki, window_id)
+                else:
+                    # 若未達到自動 flush 門檻，手動 flush 當前批次
+                    wiki.flush(window_id)
+                    wait_for_flush_complete(wiki, window_id)
+                print(_c(f"    stage#{sidx} batch#{bidx} flushed", DIM))
+                time.sleep(WINDOW_COOLDOWN_SECONDS)
         print(_c(f"  - ingested {qid} with {len(stages)} stages", DIM))
         time.sleep(RECORD_COOLDOWN_SECONDS)
 
