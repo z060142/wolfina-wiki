@@ -29,6 +29,8 @@ def test_flatten_session_keeps_roles() -> None:
 
 def test_segment_haystack_sessions() -> None:
     record = {
+        "haystack_session_ids": ["id1", "id2", "id3"],
+        "haystack_dates": ["d1", "d2", "d3"],
         "haystack_sessions": [
             [{"role": "user", "content": "s1"}],
             [{"role": "assistant", "content": "s2"}],
@@ -37,8 +39,9 @@ def test_segment_haystack_sessions() -> None:
     }
     stages = segment_haystack_sessions(record, sessions_per_stage=2)
     assert len(stages) == 2
-    assert stages[0][0]["content"] == "s1"
-    assert stages[1][0]["content"] == "s3"
+    assert stages[0][0]["content"] == "[session_meta] id=id1 date=d1"
+    assert stages[0][1]["content"] == "s1"
+    assert stages[1][0]["content"] == "[session_meta] id=id3 date=d3"
 
 
 def test_build_staged_history_chunks_obeys_size_limit() -> None:

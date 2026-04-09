@@ -50,6 +50,8 @@ OFFICIAL_FILES = {
 
 MAX_STAGE_CHARS = int(os.environ.get("LONGMEMEVAL_MAX_STAGE_CHARS", "5000"))
 WINDOW_COOLDOWN_SECONDS = float(os.environ.get("LONGMEMEVAL_WINDOW_COOLDOWN_SECONDS", "1.5"))
+MESSAGE_COOLDOWN_SECONDS = float(os.environ.get("LONGMEMEVAL_MESSAGE_COOLDOWN_SECONDS", "0.2"))
+RECORD_COOLDOWN_SECONDS = float(os.environ.get("LONGMEMEVAL_RECORD_COOLDOWN_SECONDS", "0.8"))
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -218,11 +220,81 @@ def choose_from_list(title: str, items: list[Path]) -> Path:
         print(_c("無效輸入，請重試。", YELLOW))
 
 
-def load_records(path: Path) -> list[dict[str, Any]]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, list):
-        raise ValueError(f"{path.name} 不是 list 格式")
-    return [x for x in raw if isinstance(x, dict)]
+def _iter_records_stream(path: Path) -> Any:
+    """Stream records from a large JSON array file.
+
+    LongMemEval_M can be several GB, so this parser avoids loading the whole
+    file into memory.
+    """
+    decoder = json.JSONDecoder()
+    with path.open("r", encoding="utf-8") as f:
+        buf = ""
+        idx = 0
+        started = False
+        eof = False
+
+        while True:
+            if idx >= len(buf) and eof:
+                return
+            if idx >= len(buf) - 1 and not eof:
+                chunk = f.read(1024 * 1024)
+                if chunk:
+                    if idx > 0:
+                        buf = buf[idx:] + chunk
+                        idx = 0
+                    else:
+                        buf += chunk
+                else:
+                    eof = True
+
+            while idx < len(buf) and buf[idx].isspace():
+                idx += 1
+            if idx >= len(buf):
+                continue
+
+            if not started:
+                if buf[idx] != "[":
+                    raise ValueError(f"{path.name} 不是 JSON array 格式")
+                started = True
+                idx += 1
+                continue
+
+            while idx < len(buf) and buf[idx].isspace():
+                idx += 1
+            if idx >= len(buf):
+                continue
+            if buf[idx] == "]":
+                return
+            if buf[idx] == ",":
+                idx += 1
+                continue
+
+            try:
+                obj, end = decoder.raw_decode(buf, idx)
+                idx = end
+                if isinstance(obj, dict):
+                    yield obj
+            except json.JSONDecodeError:
+                if eof:
+                    raise
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    eof = True
+                else:
+                    if idx > 0:
+                        buf = buf[idx:] + chunk
+                        idx = 0
+                    else:
+                        buf += chunk
+
+
+def iter_records(path: Path, limit: int | None = None) -> Any:
+    count = 0
+    for rec in _iter_records_stream(path):
+        yield rec
+        count += 1
+        if limit and count >= limit:
+            return
 
 
 def stage_profile_for_dataset(path: Path) -> StageProfile:
@@ -253,12 +325,17 @@ def segment_haystack_sessions(record: dict[str, Any], sessions_per_stage: int) -
     sessions = record.get("haystack_sessions")
     if not isinstance(sessions, list):
         return []
+    session_ids = record.get("haystack_session_ids")
+    session_dates = record.get("haystack_dates")
 
     stage_turns: list[list[dict[str, str]]] = []
     for i in range(0, len(sessions), sessions_per_stage):
         slice_sessions = sessions[i : i + sessions_per_stage]
         turns: list[dict[str, str]] = []
-        for sess in slice_sessions:
+        for j, sess in enumerate(slice_sessions, start=i):
+            sid = session_ids[j] if isinstance(session_ids, list) and j < len(session_ids) else f"session_{j+1}"
+            sdate = session_dates[j] if isinstance(session_dates, list) and j < len(session_dates) else ""
+            turns.append({"role": "user", "content": f"[session_meta] id={sid} date={sdate}"})
             turns.extend(flatten_session(sess))
         if turns:
             stage_turns.append(turns)
@@ -276,13 +353,10 @@ def wait_for_flush_complete(wiki: WikiClient, window_id: str, timeout_seconds: i
 
 
 def install_dataset_to_wiki(wiki: WikiClient, dataset_path: Path, limit: int | None = None) -> None:
-    records = load_records(dataset_path)
     profile = stage_profile_for_dataset(dataset_path)
     print(_c(f"[dataset] {dataset_path.name} -> {profile.name}, sessions/stage={profile.sessions_per_stage}", CYAN))
 
-    for ridx, rec in enumerate(records, start=1):
-        if limit and ridx > limit:
-            break
+    for ridx, rec in enumerate(iter_records(dataset_path, limit=limit), start=1):
         qid = str(rec.get("question_id") or f"q-{ridx}")
         stages = segment_haystack_sessions(rec, sessions_per_stage=profile.sessions_per_stage)
         for sidx, turns in enumerate(stages, start=1):
@@ -290,11 +364,13 @@ def install_dataset_to_wiki(wiki: WikiClient, dataset_path: Path, limit: int | N
             window_id = window["id"]
             for msg in turns:
                 wiki.add_message(window_id, msg["role"], msg["content"])
+                time.sleep(MESSAGE_COOLDOWN_SECONDS)
             wiki.flush(window_id)
             wait_for_flush_complete(wiki, window_id)
             # 放慢節奏，讓伺服器有時間把 window 狀態穩定回 active/cleared
             time.sleep(WINDOW_COOLDOWN_SECONDS)
         print(_c(f"  - ingested {qid} with {len(stages)} stages", DIM))
+        time.sleep(RECORD_COOLDOWN_SECONDS)
 
 
 def _format_session_block(session: Any, idx: int) -> str:
@@ -322,10 +398,16 @@ def build_staged_history_chunks(
     current_chars = 0
     current_count = 0
 
+    session_ids = record.get("haystack_session_ids")
+    session_dates = record.get("haystack_dates")
+
     for idx, session in enumerate(sessions, start=1):
         block = _format_session_block(session, idx)
         if not block:
             continue
+        sid = session_ids[idx - 1] if isinstance(session_ids, list) and idx - 1 < len(session_ids) else f"session_{idx}"
+        sdate = session_dates[idx - 1] if isinstance(session_dates, list) and idx - 1 < len(session_dates) else ""
+        block = f"[session_meta] id={sid} date={sdate}\n{block}"
         block_len = len(block)
 
         will_overflow_chars = current and (current_chars + block_len + 2 > max_chars)
@@ -380,7 +462,6 @@ def build_question_prompt(record: dict[str, Any]) -> str:
 
 
 def run_longmemeval_tests(wiki_url: str, dataset_path: Path, out_dir: Path, limit: int | None = None) -> Path:
-    records = load_records(dataset_path)
     out_dir.mkdir(parents=True, exist_ok=True)
     hypothesis_path = out_dir / f"hypothesis_{dataset_path.stem}.jsonl"
     debug_path = out_dir / f"debug_{dataset_path.stem}.jsonl"
@@ -388,9 +469,7 @@ def run_longmemeval_tests(wiki_url: str, dataset_path: Path, out_dir: Path, limi
     director = DirectorClient(wiki_url)
     try:
         with hypothesis_path.open("w", encoding="utf-8") as hypo_f, debug_path.open("w", encoding="utf-8") as dbg_f:
-            for idx, rec in enumerate(records, start=1):
-                if limit and idx > limit:
-                    break
+            for idx, rec in enumerate(iter_records(dataset_path, limit=limit), start=1):
                 qid = str(rec.get("question_id") or f"q-{idx}")
                 sid = director.create_session(title=f"LongMemEval::{qid}")
 
@@ -411,6 +490,7 @@ def run_longmemeval_tests(wiki_url: str, dataset_path: Path, out_dir: Path, limi
                         """
                     ).strip()
                     director.chat(sid, memory_prompt)
+                    time.sleep(MESSAGE_COOLDOWN_SECONDS)
 
                 prompt = build_question_prompt(rec)
                 hypothesis = director.chat(sid, prompt).strip()
@@ -426,6 +506,7 @@ def run_longmemeval_tests(wiki_url: str, dataset_path: Path, out_dir: Path, limi
                 }
                 dbg_f.write(json.dumps(dbg_row, ensure_ascii=False) + "\n")
                 print(_c(f"  - tested {qid}", DIM))
+                time.sleep(RECORD_COOLDOWN_SECONDS)
     finally:
         director.close()
 
