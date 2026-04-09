@@ -1,45 +1,53 @@
-from longmemeval_demo import derive_profile, extract_turns, segment_turns
+from pathlib import Path
+
+from longmemeval_demo import (
+    build_question_prompt,
+    flatten_session,
+    segment_haystack_sessions,
+    stage_profile_for_dataset,
+)
 
 
-def test_extract_turns_from_messages() -> None:
-    record = {
-        "messages": [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi"},
-        ]
-    }
-    turns = extract_turns(record)
+def test_stage_profile_by_filename() -> None:
+    assert stage_profile_for_dataset(Path("longmemeval_m_cleaned.json")).sessions_per_stage == 25
+    assert stage_profile_for_dataset(Path("longmemeval_oracle.json")).sessions_per_stage == 5
+    assert stage_profile_for_dataset(Path("longmemeval_s_cleaned.json")).sessions_per_stage == 10
+
+
+def test_flatten_session_keeps_roles() -> None:
+    session = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    turns = flatten_session(session)
     assert turns == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
 
 
-def test_extract_turns_fallback_context_question_answer() -> None:
+def test_segment_haystack_sessions() -> None:
     record = {
-        "context": "Alice likes tea.",
-        "question": "What does Alice like?",
-        "answer": "tea",
+        "haystack_sessions": [
+            [{"role": "user", "content": "s1"}],
+            [{"role": "assistant", "content": "s2"}],
+            [{"role": "user", "content": "s3"}],
+        ]
     }
-    turns = extract_turns(record)
-    assert len(turns) == 3
-    assert turns[-1]["role"] == "assistant"
+    stages = segment_haystack_sessions(record, sessions_per_stage=2)
+    assert len(stages) == 2
+    assert stages[0][0]["content"] == "s1"
+    assert stages[1][0]["content"] == "s3"
 
 
-def test_segment_turns() -> None:
-    turns = [{"role": "user", "content": str(i)} for i in range(10)]
-    windows = segment_turns(turns, 4)
-    assert [len(w) for w in windows] == [4, 4, 2]
-
-
-def test_profile_long_context() -> None:
-    records = [
-        {
-            "messages": [
-                {"role": "user", "content": "x" * 400},
-                {"role": "assistant", "content": "y" * 400},
-            ]
-        }
-    ]
-    profile = derive_profile(records)
-    assert profile.turns_per_window == 3
+def test_build_question_prompt_contains_key_fields() -> None:
+    record = {
+        "question_id": "q1",
+        "question_date": "2024-10-01",
+        "question": "What did I eat?",
+        "haystack_sessions": [[{"role": "user", "content": "I ate ramen."}]],
+    }
+    prompt = build_question_prompt(record)
+    assert "q1" in prompt
+    assert "2024-10-01" in prompt
+    assert "I ate ramen." in prompt

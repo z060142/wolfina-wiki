@@ -1,17 +1,20 @@
-"""longmemeval_demo.py — CLI workflow to ingest and evaluate LongMemEval datasets.
+"""longmemeval_demo.py — LongMemEval workflow CLI for wolfina-wiki.
 
-Usage examples:
-    uv run python longmemeval_demo.py
-    uv run python longmemeval_demo.py --wiki-url http://localhost:8000 --bootstrap
-    uv run python longmemeval_demo.py --download-only
+Aligned with official LongMemEval instructions:
+- Repo: https://github.com/xiaowu0162/LongMemEval
+- Data files under LongMemEval/data/
+- Evaluation script: LongMemEval/src/evaluation/evaluate_qa.py
+
+Usage:
+    uv run python longmemeval_demo.py --bootstrap
 
 Interactive commands:
-    /download                      Download/update LongMemEval benchmark repo
-    /install-dataset               Choose an installed dataset and ingest into wiki windows
-    /run-test                      Choose a corpus, run Director tests, and score results
-    /status                        Show local asset status
-    /help                          Show command help
-    quit / exit                    End session
+    /download         clone/pull LongMemEval repo
+    /install-dataset  download official cleaned datasets and ingest into wiki windows
+    /run-test         run Director on selected corpus and call official evaluate_qa.py
+    /status           show local status
+    /help             help
+    quit / exit       leave
 """
 
 from __future__ import annotations
@@ -31,12 +34,19 @@ import httpx
 
 LONGMEMEVAL_REPO_URL = os.environ.get(
     "LONGMEMEVAL_REPO_URL",
-    "https://github.com/THUDM/LongMemEval.git",
+    "https://github.com/xiaowu0162/LongMemEval.git",
 )
 ASSET_ROOT = Path(os.environ.get("LONGMEMEVAL_ASSET_ROOT", ".longmemeval_assets"))
 REPO_DIR = ASSET_ROOT / "LongMemEval"
-DATASET_DIR = ASSET_ROOT / "datasets"
+DATA_DIR = REPO_DIR / "data"
 RESULTS_DIR = ASSET_ROOT / "results"
+
+HF_BASE = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main"
+OFFICIAL_FILES = {
+    "longmemeval_oracle.json": f"{HF_BASE}/longmemeval_oracle.json",
+    "longmemeval_s_cleaned.json": f"{HF_BASE}/longmemeval_s_cleaned.json",
+    "longmemeval_m_cleaned.json": f"{HF_BASE}/longmemeval_m_cleaned.json",
+}
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -64,9 +74,9 @@ def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
 
 
 @dataclass
-class SegmentProfile:
+class StageProfile:
     name: str
-    turns_per_window: int
+    sessions_per_stage: int
 
 
 class WikiClient:
@@ -84,27 +94,20 @@ class WikiClient:
         resp.raise_for_status()
         return resp.json()
 
-    def add_message(self, window_id: str, role: str, content: str) -> dict[str, Any]:
+    def add_message(self, window_id: str, role: str, content: str) -> None:
         resp = self._http.post(
             f"{self._base}/conversations/windows/{window_id}/messages",
             json={"role": role, "content": content},
             headers=self._headers,
         )
         resp.raise_for_status()
-        return resp.json()
 
     def flush(self, window_id: str) -> None:
-        resp = self._http.post(
-            f"{self._base}/conversations/windows/{window_id}/flush",
-            headers=self._headers,
-        )
+        resp = self._http.post(f"{self._base}/conversations/windows/{window_id}/flush", headers=self._headers)
         resp.raise_for_status()
 
     def get_window(self, window_id: str) -> dict[str, Any]:
-        resp = self._http.get(
-            f"{self._base}/conversations/windows/{window_id}",
-            headers=self._headers,
-        )
+        resp = self._http.get(f"{self._base}/conversations/windows/{window_id}", headers=self._headers)
         resp.raise_for_status()
         return resp.json()
 
@@ -141,7 +144,7 @@ class DirectorClient:
                 except json.JSONDecodeError:
                     continue
                 if evt.get("type") == "reply":
-                    answer = evt.get("text", "")
+                    answer = str(evt.get("text") or "")
         return answer
 
     def close(self) -> None:
@@ -150,42 +153,45 @@ class DirectorClient:
 
 def ensure_repo() -> Path:
     ASSET_ROOT.mkdir(parents=True, exist_ok=True)
-    DATASET_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     if REPO_DIR.exists():
-        print(_c("[download] 更新 LongMemEval repo...", CYAN))
         cp = _run(["git", "pull", "--ff-only"], cwd=REPO_DIR)
         if cp.returncode != 0:
             raise RuntimeError(f"git pull 失敗: {cp.stderr.strip()}")
     else:
-        print(_c("[download] 下載 LongMemEval repo...", CYAN))
         cp = _run(["git", "clone", LONGMEMEVAL_REPO_URL, str(REPO_DIR)])
         if cp.returncode != 0:
             raise RuntimeError(f"git clone 失敗: {cp.stderr.strip()}")
 
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     return REPO_DIR
 
 
-def discover_dataset_files(root: Path) -> list[Path]:
-    candidates = sorted(
-        [
-            *root.rglob("*.json"),
-            *root.rglob("*.jsonl"),
-        ]
-    )
-    # 排除明顯非資料集的檔案
-    return [p for p in candidates if "result" not in p.name.lower() and "report" not in p.name.lower()]
+def download_official_datasets() -> list[Path]:
+    ensure_repo()
+    saved: list[Path] = []
+    with httpx.Client(timeout=120.0, follow_redirects=True) as client:
+        for filename, url in OFFICIAL_FILES.items():
+            target = DATA_DIR / filename
+            print(_c(f"[dataset] download {filename}", CYAN))
+            resp = client.get(url)
+            resp.raise_for_status()
+            target.write_bytes(resp.content)
+            saved.append(target)
+    return saved
+
+
+def list_official_dataset_files() -> list[Path]:
+    return [DATA_DIR / name for name in OFFICIAL_FILES if (DATA_DIR / name).exists()]
 
 
 def choose_from_list(title: str, items: list[Path]) -> Path:
     if not items:
         raise RuntimeError(f"{title}：找不到可用項目")
-
     print(_c(f"\n{title}", BOLD, CYAN))
     for idx, item in enumerate(items, start=1):
-        print(f"  {idx}. {item}")
-
+        print(f"  {idx}. {item.name}")
     while True:
         raw = input(_c("請輸入編號: ", GREEN, BOLD)).strip()
         if raw.isdigit() and 1 <= int(raw) <= len(items):
@@ -194,91 +200,50 @@ def choose_from_list(title: str, items: list[Path]) -> Path:
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
-    if path.suffix == ".jsonl":
-        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    else:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, list):
-            records = raw
-        elif isinstance(raw, dict):
-            for key in ("data", "examples", "records", "items"):
-                if isinstance(raw.get(key), list):
-                    return raw[key]
-            records = [raw]
-        else:
-            records = []
-    return [r for r in records if isinstance(r, dict)]
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError(f"{path.name} 不是 list 格式")
+    return [x for x in raw if isinstance(x, dict)]
 
 
-def extract_turns(record: dict[str, Any]) -> list[dict[str, str]]:
-    for key in ("messages", "conversation", "dialogue", "turns"):
-        value = record.get(key)
-        if isinstance(value, list):
-            turns: list[dict[str, str]] = []
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                role = str(item.get("role") or item.get("speaker") or "user").lower()
-                content = str(item.get("content") or item.get("text") or item.get("utterance") or "").strip()
-                if content:
-                    turns.append({"role": "assistant" if "assistant" in role or role in {"bot", "model"} else "user", "content": content})
-            if turns:
-                return turns
+def stage_profile_for_dataset(path: Path) -> StageProfile:
+    name = path.name.lower()
+    if "_m_" in name or name.endswith("m_cleaned.json"):
+        return StageProfile(name="LongMemEval_M", sessions_per_stage=25)
+    if "oracle" in name:
+        return StageProfile(name="LongMemEval_Oracle", sessions_per_stage=5)
+    return StageProfile(name="LongMemEval_S", sessions_per_stage=10)
 
-    context = str(record.get("context") or record.get("history") or "").strip()
-    question = str(record.get("question") or record.get("query") or "").strip()
-    answer = str(record.get("answer") or record.get("target") or record.get("gold") or "").strip()
 
+def flatten_session(session: Any) -> list[dict[str, str]]:
+    if not isinstance(session, list):
+        return []
     turns: list[dict[str, str]] = []
-    if context:
-        turns.append({"role": "user", "content": context})
-    if question:
-        turns.append({"role": "user", "content": question})
-    if answer:
-        turns.append({"role": "assistant", "content": answer})
+    for turn in session:
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role") or "user").lower()
+        content = str(turn.get("content") or "").strip()
+        if not content:
+            continue
+        turns.append({"role": "assistant" if role == "assistant" else "user", "content": content})
     return turns
 
 
-def derive_profile(records: list[dict[str, Any]]) -> SegmentProfile:
-    sample_turns = [extract_turns(r) for r in records[:20]]
-    flat = [t for turns in sample_turns for t in turns]
-    avg_len = (sum(len(t["content"]) for t in flat) / len(flat)) if flat else 120
+def segment_haystack_sessions(record: dict[str, Any], sessions_per_stage: int) -> list[list[dict[str, str]]]:
+    sessions = record.get("haystack_sessions")
+    if not isinstance(sessions, list):
+        return []
 
-    if avg_len > 320:
-        return SegmentProfile(name="long-context", turns_per_window=3)
-    if avg_len > 180:
-        return SegmentProfile(name="medium-context", turns_per_window=5)
-    return SegmentProfile(name="short-context", turns_per_window=8)
-
-
-def segment_turns(turns: list[dict[str, str]], turns_per_window: int) -> list[list[dict[str, str]]]:
-    if turns_per_window <= 0:
-        raise ValueError("turns_per_window must be > 0")
-    return [turns[i : i + turns_per_window] for i in range(0, len(turns), turns_per_window)]
-
-
-def install_dataset_to_wiki(wiki: WikiClient, dataset_path: Path) -> None:
-    records = load_records(dataset_path)
-    if not records:
-        raise RuntimeError("資料集沒有可處理記錄")
-
-    profile = derive_profile(records)
-    print(_c(f"[dataset] profile={profile.name}, turns/window={profile.turns_per_window}", CYAN))
-
-    for ridx, record in enumerate(records, start=1):
-        turns = extract_turns(record)
-        if not turns:
-            continue
-        for pidx, phase in enumerate(segment_turns(turns, profile.turns_per_window), start=1):
-            window = wiki.create_window(
-                source_id=f"longmemeval:{dataset_path.stem}:record-{ridx}:phase-{pidx}"
-            )
-            window_id = window["id"]
-            for msg in phase:
-                wiki.add_message(window_id, msg["role"], msg["content"])
-            wiki.flush(window_id)
-            wait_for_flush_complete(wiki, window_id)
-            print(_c(f"  - flushed record#{ridx} phase#{pidx} window={window_id[:8]}...", DIM))
+    stage_turns: list[list[dict[str, str]]] = []
+    for i in range(0, len(sessions), sessions_per_stage):
+        slice_sessions = sessions[i : i + sessions_per_stage]
+        turns: list[dict[str, str]] = []
+        for sess in slice_sessions:
+            turns.extend(flatten_session(sess))
+        if turns:
+            stage_turns.append(turns)
+    return stage_turns
 
 
 def wait_for_flush_complete(wiki: WikiClient, window_id: str, timeout_seconds: int = 300) -> None:
@@ -287,132 +252,134 @@ def wait_for_flush_complete(wiki: WikiClient, window_id: str, timeout_seconds: i
         status = wiki.get_window(window_id).get("status")
         if status in {"cleared", "active"}:
             return
-        time.sleep(1.5)
+        time.sleep(1.0)
     raise TimeoutError(f"window {window_id} flush timeout")
 
 
-def extract_test_case(record: dict[str, Any], index: int) -> dict[str, str]:
-    question = str(record.get("question") or record.get("query") or record.get("prompt") or "").strip()
-    ground_truth = str(record.get("answer") or record.get("target") or record.get("gold") or "").strip()
-    context = str(record.get("context") or record.get("history") or "").strip()
+def install_dataset_to_wiki(wiki: WikiClient, dataset_path: Path, limit: int | None = None) -> None:
+    records = load_records(dataset_path)
+    profile = stage_profile_for_dataset(dataset_path)
+    print(_c(f"[dataset] {dataset_path.name} -> {profile.name}, sessions/stage={profile.sessions_per_stage}", CYAN))
 
-    if not question:
-        turns = extract_turns(record)
-        if turns:
-            question = turns[-1]["content"]
-    if not question:
-        question = f"[sample-{index}] Please summarize the memory in this record."
+    for ridx, rec in enumerate(records, start=1):
+        if limit and ridx > limit:
+            break
+        qid = str(rec.get("question_id") or f"q-{ridx}")
+        stages = segment_haystack_sessions(rec, sessions_per_stage=profile.sessions_per_stage)
+        for sidx, turns in enumerate(stages, start=1):
+            window = wiki.create_window(source_id=f"longmemeval:{dataset_path.stem}:{qid}:stage-{sidx}")
+            window_id = window["id"]
+            for msg in turns:
+                wiki.add_message(window_id, msg["role"], msg["content"])
+            wiki.flush(window_id)
+            wait_for_flush_complete(wiki, window_id)
+        print(_c(f"  - ingested {qid} with {len(stages)} stages", DIM))
 
-    return {
-        "id": str(record.get("id") or record.get("qid") or f"sample-{index}"),
-        "question": question,
-        "ground_truth": ground_truth,
-        "context": context,
-    }
+
+def build_question_prompt(record: dict[str, Any]) -> str:
+    qid = str(record.get("question_id") or "unknown")
+    question_date = str(record.get("question_date") or "")
+    question = str(record.get("question") or "").strip()
+    sessions = record.get("haystack_sessions")
+
+    history_blocks: list[str] = []
+    if isinstance(sessions, list):
+        for idx, session in enumerate(sessions, start=1):
+            turns = flatten_session(session)
+            if not turns:
+                continue
+            lines = [f"Session {idx}:"]
+            for t in turns:
+                lines.append(f"- {t['role']}: {t['content']}")
+            history_blocks.append("\n".join(lines))
+
+    history = "\n\n".join(history_blocks)
+    return textwrap.dedent(
+        f"""
+        你是記憶測試助手。請根據完整歷史回答問題，若歷史沒有答案請明確說不知道。
+
+        [Question ID]
+        {qid}
+
+        [Question Date]
+        {question_date}
+
+        [History Sessions]
+        {history}
+
+        [Question]
+        {question}
+        """
+    ).strip()
 
 
-def run_longmemeval_tests(wiki_url: str, corpus_path: Path, out_dir: Path, limit: int | None = None) -> Path:
-    records = load_records(corpus_path)
-    if not records:
-        raise RuntimeError("語料庫沒有可測試資料")
-
+def run_longmemeval_tests(wiki_url: str, dataset_path: Path, out_dir: Path, limit: int | None = None) -> Path:
+    records = load_records(dataset_path)
     out_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = out_dir / f"predictions_{corpus_path.stem}.jsonl"
+    hypothesis_path = out_dir / f"hypothesis_{dataset_path.stem}.jsonl"
+    debug_path = out_dir / f"debug_{dataset_path.stem}.jsonl"
 
     director = DirectorClient(wiki_url)
-    session_id = director.create_session(title=f"LongMemEval::{corpus_path.stem}")
-
     try:
-        with pred_path.open("w", encoding="utf-8") as f:
-            for idx, record in enumerate(records, start=1):
+        with hypothesis_path.open("w", encoding="utf-8") as hypo_f, debug_path.open("w", encoding="utf-8") as dbg_f:
+            for idx, rec in enumerate(records, start=1):
                 if limit and idx > limit:
                     break
-                case = extract_test_case(record, idx)
+                qid = str(rec.get("question_id") or f"q-{idx}")
+                prompt = build_question_prompt(rec)
+                sid = director.create_session(title=f"LongMemEval::{qid}")
+                hypothesis = director.chat(sid, prompt).strip()
 
-                prompt = textwrap.dedent(
-                    f"""
-                    請根據以下記憶任務作答，避免多餘前言。
+                hypo_row = {"question_id": qid, "hypothesis": hypothesis}
+                hypo_f.write(json.dumps(hypo_row, ensure_ascii=False) + "\n")
 
-                    [Context]
-                    {case['context']}
-
-                    [Question]
-                    {case['question']}
-                    """
-                ).strip()
-
-                prediction = director.chat(session_id, prompt).strip()
-                row = {
-                    "id": case["id"],
-                    "question": case["question"],
-                    "prediction": prediction,
-                    "ground_truth": case["ground_truth"],
-                    "dataset": corpus_path.stem,
+                dbg_row = {
+                    "question_id": qid,
+                    "question": rec.get("question"),
+                    "answer": rec.get("answer"),
+                    "hypothesis": hypothesis,
                 }
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-                print(_c(f"  - tested {case['id']}", DIM))
+                dbg_f.write(json.dumps(dbg_row, ensure_ascii=False) + "\n")
+                print(_c(f"  - tested {qid}", DIM))
     finally:
         director.close()
 
-    return pred_path
+    return hypothesis_path
 
 
-def simple_score(pred_path: Path) -> dict[str, Any]:
-    rows = [json.loads(line) for line in pred_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not rows:
-        return {"total": 0, "exact_match": 0.0}
+def run_official_evaluation(hypothesis_path: Path, dataset_path: Path) -> tuple[bool, str, Path]:
+    eval_dir = REPO_DIR / "src" / "evaluation"
+    eval_script = eval_dir / "evaluate_qa.py"
+    if not eval_script.exists():
+        return False, "找不到官方 evaluate_qa.py", hypothesis_path.with_suffix(".log")
 
-    hit = 0
-    valid = 0
-    for row in rows:
-        gold = str(row.get("ground_truth") or "").strip().lower()
-        pred = str(row.get("prediction") or "").strip().lower()
-        if not gold:
-            continue
-        valid += 1
-        if gold == pred:
-            hit += 1
+    model_name = os.environ.get("LONGMEMEVAL_EVAL_MODEL", "gpt-4o")
+    cmd = [sys.executable, "evaluate_qa.py", model_name, str(hypothesis_path), str(dataset_path)]
+    cp = _run(cmd, cwd=eval_dir)
 
-    return {
-        "total": len(rows),
-        "scored": valid,
-        "exact_match": round((hit / valid), 4) if valid else 0.0,
-    }
+    log_path = Path(str(hypothesis_path) + ".log")
+    if cp.returncode != 0:
+        msg = cp.stderr.strip() or cp.stdout.strip() or "evaluate_qa.py failed"
+        return False, msg, log_path
+
+    return True, "官方評分完成", log_path
 
 
-def try_run_official_scorer(pred_path: Path, report_path: Path) -> tuple[bool, str]:
-    candidates = [
-        REPO_DIR / "scripts" / "evaluate.py",
-        REPO_DIR / "eval" / "evaluate.py",
-        REPO_DIR / "evaluation" / "evaluate.py",
-    ]
-
-    for script in candidates:
-        if not script.exists():
-            continue
-        cmd = [sys.executable, str(script), "--pred", str(pred_path), "--output", str(report_path)]
-        cp = _run(cmd)
-        if cp.returncode == 0:
-            return True, f"官方評分腳本成功: {script}"
-    return False, "找不到可直接呼叫的官方 evaluate.py，改用內建評分。"
-
-
-def write_report(pred_path: Path, out_dir: Path) -> Path:
+def write_report(hypothesis_path: Path, dataset_path: Path, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    report_path = out_dir / f"report_{pred_path.stem}.json"
+    ok, note, log_path = run_official_evaluation(hypothesis_path, dataset_path)
 
-    ok, note = try_run_official_scorer(pred_path, report_path)
-    if ok:
-        return report_path
-
-    metrics = simple_score(pred_path)
-    payload = {
-        "scorer": "built-in-fallback",
+    report = {
+        "dataset": str(dataset_path),
+        "hypothesis_file": str(hypothesis_path),
+        "official_eval_ok": ok,
         "note": note,
-        "metrics": metrics,
-        "prediction_file": str(pred_path),
+        "log_file": str(log_path),
+        "date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    report_path = out_dir / f"report_{dataset_path.stem}.json"
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report_path
 
 
@@ -433,6 +400,7 @@ def interactive_shell(wiki_url: str, bootstrap: bool) -> None:
 
         if command in {"quit", "exit"}:
             break
+
         if command in {"/help", "help"}:
             print("/download | /install-dataset | /run-test | /status | quit")
             continue
@@ -440,46 +408,49 @@ def interactive_shell(wiki_url: str, bootstrap: bool) -> None:
         try:
             if command == "/download":
                 ensure_repo()
-                print(_c("下載/更新完成。", GREEN))
-            elif command == "/status":
-                print(f"repo: {'ok' if REPO_DIR.exists() else 'missing'} @ {REPO_DIR}")
-                print(f"datasets: {len(discover_dataset_files(DATASET_DIR))} files")
-                print(f"results: {len(list(RESULTS_DIR.glob('*.json*')))} files")
-            elif command == "/install-dataset":
-                ensure_repo()
-                src_files = discover_dataset_files(REPO_DIR)
-                selected = choose_from_list("選擇要安裝的資料集", src_files)
-                target = DATASET_DIR / selected.name
-                target.write_text(selected.read_text(encoding="utf-8"), encoding="utf-8")
+                print(_c("LongMemEval repo 已完成下載/更新。", GREEN))
 
+            elif command == "/install-dataset":
+                files = download_official_datasets()
+                selected = choose_from_list("選擇要匯入到 wiki 的資料集", files)
                 wiki = WikiClient(wiki_url)
                 try:
-                    install_dataset_to_wiki(wiki, target)
+                    install_dataset_to_wiki(wiki, selected)
                 finally:
                     wiki.close()
-                print(_c("資料集已安裝並完成分段 flush。", GREEN))
+                print(_c("資料集匯入完成（已分 stage flush）。", GREEN))
+
             elif command == "/run-test":
                 ensure_repo()
-                corpora = discover_dataset_files(DATASET_DIR)
-                selected = choose_from_list("選擇要測試的語料", corpora)
-                ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-                run_dir = RESULTS_DIR / ts
-                pred = run_longmemeval_tests(wiki_url, selected, run_dir)
-                report = write_report(pred, run_dir)
-                print(_c(f"測試完成\n  predictions: {pred}\n  report: {report}", GREEN))
+                choices = list_official_dataset_files()
+                selected = choose_from_list("選擇要測試的語料", choices)
+                run_dir = RESULTS_DIR / time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+                hypo = run_longmemeval_tests(wiki_url, selected, run_dir)
+                report = write_report(hypo, selected, run_dir)
+                print(_c(f"測試完成\n  hypothesis: {hypo}\n  report: {report}", GREEN))
+
+            elif command == "/status":
+                print(f"repo: {'ok' if REPO_DIR.exists() else 'missing'} @ {REPO_DIR}")
+                files = list_official_dataset_files()
+                print(f"official data files: {len(files)}")
+                for p in files:
+                    print(f"  - {p.name}")
+                print(f"results dirs: {len([p for p in RESULTS_DIR.glob('*') if p.is_dir()])}")
+
             elif not command:
                 continue
             else:
                 print(_c("未知命令，輸入 /help 取得幫助。", YELLOW))
+
         except Exception as exc:
             print(_c(f"[error] {exc}", RED))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run LongMemEval workflow with wolfina-wiki")
+    parser = argparse.ArgumentParser(description="Run official LongMemEval workflow with wolfina-wiki")
     parser.add_argument("--wiki-url", default="http://localhost:8000")
-    parser.add_argument("--bootstrap", action="store_true", help="launch 時先下載/更新 LongMemEval")
-    parser.add_argument("--download-only", action="store_true")
+    parser.add_argument("--bootstrap", action="store_true", help="啟動時先 clone/pull LongMemEval")
+    parser.add_argument("--download-only", action="store_true", help="只下載/更新 LongMemEval repo")
     args = parser.parse_args()
 
     if args.download_only:
@@ -487,12 +458,11 @@ def main() -> None:
         print("done")
         return
 
-    # 檢查 wiki 連線（失敗不直接中止，仍可先 /download）
-    with httpx.Client(timeout=5.0) as http:
+    with httpx.Client(timeout=5.0) as client:
         try:
-            http.get(f"{args.wiki_url.rstrip('/')}/docs")
+            client.get(f"{args.wiki_url.rstrip('/')}/docs")
         except Exception:
-            print(_c("[warning] 暫時無法連上 wiki API，你仍可先下載資料。", YELLOW))
+            print(_c("[warning] 暫時無法連上 wiki API，你仍可先 /download。", YELLOW))
 
     interactive_shell(args.wiki_url, bootstrap=args.bootstrap)
 
