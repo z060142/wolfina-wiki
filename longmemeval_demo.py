@@ -48,6 +48,8 @@ OFFICIAL_FILES = {
     "longmemeval_m_cleaned.json": f"{HF_BASE}/longmemeval_m_cleaned.json",
 }
 
+MAX_STAGE_CHARS = int(os.environ.get("LONGMEMEVAL_MAX_STAGE_CHARS", "12000"))
+
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -209,10 +211,10 @@ def load_records(path: Path) -> list[dict[str, Any]]:
 def stage_profile_for_dataset(path: Path) -> StageProfile:
     name = path.name.lower()
     if "_m_" in name or name.endswith("m_cleaned.json"):
-        return StageProfile(name="LongMemEval_M", sessions_per_stage=25)
+        return StageProfile(name="LongMemEval_M", sessions_per_stage=8)
     if "oracle" in name:
-        return StageProfile(name="LongMemEval_Oracle", sessions_per_stage=5)
-    return StageProfile(name="LongMemEval_S", sessions_per_stage=10)
+        return StageProfile(name="LongMemEval_Oracle", sessions_per_stage=4)
+    return StageProfile(name="LongMemEval_S", sessions_per_stage=3)
 
 
 def flatten_session(session: Any) -> list[dict[str, str]]:
@@ -276,36 +278,81 @@ def install_dataset_to_wiki(wiki: WikiClient, dataset_path: Path, limit: int | N
         print(_c(f"  - ingested {qid} with {len(stages)} stages", DIM))
 
 
+def _format_session_block(session: Any, idx: int) -> str:
+    turns = flatten_session(session)
+    if not turns:
+        return ""
+    lines = [f"Session {idx}:"]
+    for t in turns:
+        lines.append(f"- {t['role']}: {t['content']}")
+    return "\n".join(lines)
+
+
+def build_staged_history_chunks(
+    record: dict[str, Any],
+    *,
+    max_chars: int,
+    max_sessions_per_stage: int,
+) -> list[str]:
+    sessions = record.get("haystack_sessions")
+    if not isinstance(sessions, list):
+        return []
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    current_count = 0
+
+    for idx, session in enumerate(sessions, start=1):
+        block = _format_session_block(session, idx)
+        if not block:
+            continue
+        block_len = len(block)
+
+        will_overflow_chars = current and (current_chars + block_len + 2 > max_chars)
+        will_overflow_count = current and (current_count >= max_sessions_per_stage)
+        if will_overflow_chars or will_overflow_count:
+            chunks.append("\n\n".join(current))
+            current = []
+            current_chars = 0
+            current_count = 0
+
+        if block_len > max_chars:
+            # 單一 session 超長，硬切片避免超過單次輸入上限
+            for i in range(0, block_len, max_chars):
+                piece = block[i : i + max_chars]
+                if current:
+                    chunks.append("\n\n".join(current))
+                    current = []
+                    current_chars = 0
+                    current_count = 0
+                chunks.append(piece)
+            continue
+
+        current.append(block)
+        current_chars += block_len + 2
+        current_count += 1
+
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
 def build_question_prompt(record: dict[str, Any]) -> str:
     qid = str(record.get("question_id") or "unknown")
     question_date = str(record.get("question_date") or "")
     question = str(record.get("question") or "").strip()
-    sessions = record.get("haystack_sessions")
 
-    history_blocks: list[str] = []
-    if isinstance(sessions, list):
-        for idx, session in enumerate(sessions, start=1):
-            turns = flatten_session(session)
-            if not turns:
-                continue
-            lines = [f"Session {idx}:"]
-            for t in turns:
-                lines.append(f"- {t['role']}: {t['content']}")
-            history_blocks.append("\n".join(lines))
-
-    history = "\n\n".join(history_blocks)
     return textwrap.dedent(
         f"""
-        你是記憶測試助手。請根據完整歷史回答問題，若歷史沒有答案請明確說不知道。
+        你是記憶測試助手。你已經在前面讀過多個歷史片段。
+        現在請直接回答問題；若歷史裡沒有答案，請明確回答不知道。
 
         [Question ID]
         {qid}
 
         [Question Date]
         {question_date}
-
-        [History Sessions]
-        {history}
 
         [Question]
         {question}
@@ -326,8 +373,27 @@ def run_longmemeval_tests(wiki_url: str, dataset_path: Path, out_dir: Path, limi
                 if limit and idx > limit:
                     break
                 qid = str(rec.get("question_id") or f"q-{idx}")
-                prompt = build_question_prompt(rec)
                 sid = director.create_session(title=f"LongMemEval::{qid}")
+
+                profile = stage_profile_for_dataset(dataset_path)
+                chunks = build_staged_history_chunks(
+                    rec,
+                    max_chars=MAX_STAGE_CHARS,
+                    max_sessions_per_stage=profile.sessions_per_stage,
+                )
+                for cidx, chunk in enumerate(chunks, start=1):
+                    memory_prompt = textwrap.dedent(
+                        f"""
+                        這是記憶歷史片段 {cidx}/{len(chunks)}，請先記住，不要回答分析。
+                        只需回覆：已記住。
+
+                        [History Chunk]
+                        {chunk}
+                        """
+                    ).strip()
+                    director.chat(sid, memory_prompt)
+
+                prompt = build_question_prompt(rec)
                 hypothesis = director.chat(sid, prompt).strip()
 
                 hypo_row = {"question_id": qid, "hypothesis": hypothesis}
