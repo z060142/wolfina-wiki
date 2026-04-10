@@ -71,12 +71,36 @@ _PROPOSER_PROMPT = build_prompt(
 1. Use search_pages to check if a relevant page already exists.
 2. If it exists, use propose_page_edit to update it with new information.
 3. If it does not exist, use propose_new_page to create it.
-4. Use the provided batch_id on every proposal for traceability.""",
+4. Use the provided batch_id on every proposal for traceability.
+
+Only extract information that meets ALL of the following:
+- Explicitly stated (not inferred or assumed from tone)
+- Useful to know in a future conversation — preferences, identity, goals, ongoing projects,
+  opinions, or facts about a topic the user cares about
+- Not purely transient — a momentary reaction with no lasting meaning does not qualify
+
+Key distinction: the casual TONE of a message does not disqualify it.
+A relaxed, chatty sentence can still contain a recordable fact or preference.
+Ask yourself: "If this appeared in a summary before the next conversation, would it help
+me understand this person or topic better?" If yes, record it.
+
+Do NOT record: pure social filler ("haha", "ok", "got it"), rhetorical questions,
+content the user explicitly marked as hypothetical, or negated claims.""",
         """\
 == MAINTENANCE MODE (you receive agent tasks via list_agent_tasks) ==
 1. Use list_agent_tasks to find your pending tasks.
-2. Execute each task as instructed (may involve search_pages, get_page, propose_new_page, propose_page_edit).
-3. Call complete_agent_task with outcome="done" or "failed" when finished.""",
+2. For each task, check context_json for the action type:
+   - "revise_and_resubmit": A previous proposal was rejected. Read the rejection_reason in
+     context_json carefully. Then decide:
+     (a) If the rejection reason is fixable (e.g. missing detail, wrong format, conflicting facts
+         that can be resolved), use get_page to read current content and submit a corrected proposal
+         that directly addresses the feedback. Do NOT resubmit the same content.
+     (b) If the rejection reason reveals the proposal was fundamentally wrong, redundant, or the
+         information no longer applies, call complete_agent_task with outcome="failed" and
+         error_message explaining why you chose to abandon rather than revise. Do not resubmit.
+   - (other tasks): Execute as instructed using search_pages, get_page, propose_new_page, propose_page_edit.
+3. Use compare_pages when asked to merge pages — compare them before writing the merged content.
+4. Call complete_agent_task with outcome="done" or "failed" when finished.""",
     ],
     blocks=[
         BLOCK_PROPOSAL_GUIDELINES,
@@ -98,17 +122,45 @@ _REVIEWER_PROMPT = build_prompt(
 1. Use list_proposals with the provided batch_id to find pending proposals.
 2. Use get_page to read the current page content (for edits).
 3. Use get_page_history to check recent changes.
-4. Use review_proposal with decision="approve" or "reject" and optional feedback.""",
+4. Use compare_pages when a proposal seems to duplicate an existing page — compare them before deciding.
+5. Use review_proposal with decision="approve" or "reject" and a specific feedback message.""",
         """\
 == MAINTENANCE MODE (you receive agent tasks via list_agent_tasks) ==
 1. Use list_agent_tasks to find your pending tasks.
 2. Also use list_proposals with status="pending" (no batch_id) to find any unreviewed proposals.
-3. Review proposals using get_page, get_page_history, then review_proposal.
+3. Review proposals using get_page, get_page_history, compare_pages, then review_proposal.
 4. Call complete_agent_task with outcome="done" or "failed" when finished.""",
         """\
 == REVIEW DECISION CRITERIA ==
-Approve if: content is accurate, well-structured, and non-conflicting with existing pages.
-Reject if:  content contains errors, duplicates existing content, or lacks a clear rationale.""",
+Approve a proposal only if ALL of the following checks pass:
+□ Content is factually accurate and supported by the rationale.
+□ No direct contradiction with the existing page or related pages.
+□ Markdown is well-formed — headings, lists, and code blocks are syntactically correct.
+□ Slug (if present) is ASCII-lowercase-hyphenated: ^[a-z0-9]+(?:-[a-z0-9]+)*$
+□ Content is substantive — not a stub (a page with only a title and one or two sentences).
+□ Important relations are present (use get_related_pages to verify if uncertain).
+
+Reject if any check fails. In your feedback, name the specific check(s) that failed.""",
+        """\
+== AFTER REJECTION: CLOSE THE FEEDBACK LOOP ==
+When you reject a proposal, determine whether a revision attempt is still viable:
+
+1. Call list_agent_tasks to count how many revise_and_resubmit tasks already exist for this
+   proposal (match "original_proposal_id" in context_json).
+2. If 2 or more prior revise tasks already exist for the same proposal, do NOT create another.
+   The proposal has exhausted its revision attempts. Mark your reviewer task as complete with
+   outcome="done" and note in your response that the proposal was permanently rejected.
+3. Otherwise, call create_agent_task immediately after rejecting, with agent_type="proposer":
+   - instruction: A clear description of what needs to be fixed, referencing the original proposal.
+   - context_json: {
+       "action": "revise_and_resubmit",
+       "original_proposal_id": "<the rejected proposal id>",
+       "target_page_id": "<page id if editing existing page, or null for new page>",
+       "proposed_title": "<original proposed title>",
+       "rejection_reason": "<your specific rejection feedback — be concrete>",
+       "retry_count": <number of prior revise tasks found in step 1>
+     }
+This ensures your review decision produces actionable improvement, not an infinite revision loop.""",
     ],
     blocks=[
         BLOCK_ROLE_SEPARATION,
@@ -210,6 +262,33 @@ Example maintenance tasks:
 - Ask executor agent to apply all approved proposals
 - Ask relation agent to link recently created pages""",
         """\
+== DUPLICATE PAGE DETECTION ==
+After reviewing recently updated pages, perform a duplicate check:
+
+1. Use quick_query to ask: "Which of these page titles are likely about the same topic?
+   List any suspicious pairs." Pass the recent page titles as context.
+   Example: quick_query(query="Do any of these wiki page titles describe the same topic?
+   Titles: [list them here]. Return suspicious duplicate pairs only.")
+
+2. If quick_query identifies suspicious pairs, use compare_pages with their page_ids to
+   inspect the actual content side-by-side.
+
+3. If the pages are genuinely duplicate or highly overlapping, create a proposer task:
+   - agent_type: "proposer"
+   - instruction: "Merge duplicate pages: consolidate the content of '<title A>' into
+     '<title B>', keeping all unique facts. Then propose to archive '<title A>'."
+   - context_json: {
+       "action": "merge_pages",
+       "source_page_id": "<page A id — to be merged from>",
+       "target_page_id": "<page B id — to be merged into>",
+       "source_title": "<title A>",
+       "target_title": "<title B>",
+       "merge_reason": "<one sentence explaining why they are duplicates>"
+     }
+
+4. Only flag pairs where the content genuinely overlaps. Skip pairs that are merely
+   related topics.""",
+        """\
 == INGEST PLANNING (Round 1 — per-file scanning) ==
 When the mode includes ingest work:
 1. Use list_files to discover all files in the allowed directories.
@@ -228,7 +307,11 @@ When all pending ingest tasks are done:
    Include relevant record_ids in context_json so the ingest agent can re-read summaries.""",
         """\
 == TASK CREATION RULES ==
-Be specific in every task instruction — include record IDs, page IDs, or file paths in context_json.""",
+Be specific in every task instruction — include record IDs, page IDs, or file paths in context_json.
+
+Before creating new tasks of any type, call list_agent_tasks and count pending tasks per agent_type.
+If a given agent_type already has 3 or more pending tasks, do NOT add more tasks of that type —
+the backlog is already sufficient. Note this in your reasoning and move on.""",
     ],
     blocks=[
         BLOCK_NO_DUPLICATE_TASKS,
@@ -381,12 +464,36 @@ async def run_flush_pipeline(
         logger.exception("Flush pipeline: executor failed — batch_id=%s", batch_id)
         await db.rollback()
 
-    # 4. Relation agent
-    relation_msg = (
-        f"batch_id: {batch_id}\n"
-        f"relation_agent_id: {settings.relation_agent_id}\n\n"
-        f"Add relations for pages created or updated in batch_id={batch_id}."
+    # 4. Relation agent — pass applied page info directly so the agent doesn't need batch_id lookup
+    from core.models.proposal import EditProposal, ProposalStatus
+    from sqlalchemy import select as _select
+    applied_rows = await db.scalars(
+        _select(EditProposal).where(
+            EditProposal.batch_id == batch_id,
+            EditProposal.status == ProposalStatus.applied,
+        )
     )
+    applied_list = list(applied_rows.all())
+    if applied_list:
+        page_hints = "\n".join(
+            f"  - title={p.proposed_title}"
+            + (f"  slug={p.proposed_slug}" if p.proposed_slug else "")
+            + (f"  page_id={p.target_page_id}" if p.target_page_id else "  (new page)")
+            for p in applied_list
+        )
+        relation_msg = (
+            f"batch_id: {batch_id}\n"
+            f"relation_agent_id: {settings.relation_agent_id}\n\n"
+            f"Add relations for pages created or updated in this batch.\n\n"
+            f"Pages affected:\n{page_hints}\n\n"
+            f"Use search_pages by title or slug to locate each page, then add appropriate relations."
+        )
+    else:
+        relation_msg = (
+            f"batch_id: {batch_id}\n"
+            f"relation_agent_id: {settings.relation_agent_id}\n\n"
+            "No proposals were applied in this batch. Nothing to do — stop immediately."
+        )
     try:
         await _run_agent("relation", relation_msg, db, batch_id=batch_id)
         await db.commit()

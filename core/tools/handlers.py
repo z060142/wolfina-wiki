@@ -116,6 +116,30 @@ async def _get_related_pages(inp: dict, db: AsyncSession) -> dict:
     return {"related_pages": [_page_out(p) for p in pages]}
 
 
+async def _compare_pages(inp: dict, db: AsyncSession) -> dict:
+    """Return side-by-side title/summary/content snippet for multiple pages."""
+    page_ids = inp.get("page_ids") or []
+    if not page_ids or len(page_ids) < 2:
+        return {"error": "Provide at least 2 page_ids to compare."}
+    results = []
+    for pid in page_ids:
+        try:
+            page = await page_service.get_page(db, pid)
+            snippet = (page.content or "")[:400]
+            results.append({
+                "id": page.id,
+                "title": page.title,
+                "slug": page.slug,
+                "summary": page.summary,
+                "content_snippet": snippet + ("…" if len(page.content or "") > 400 else ""),
+                "status": page.status,
+                "updated_at": page.updated_at.isoformat() if page.updated_at else None,
+            })
+        except Exception as exc:
+            results.append({"id": pid, "error": str(exc)})
+    return {"pages": results}
+
+
 async def _get_page_history(inp: dict, db: AsyncSession) -> dict:
     versions = await version_service.get_history(db, inp["page_id"])
     return {
@@ -938,6 +962,7 @@ _HANDLERS: dict[str, Any] = {
     "get_page": _get_page,
     "list_pages": _list_pages,
     "get_related_pages": _get_related_pages,
+    "compare_pages": _compare_pages,
     "get_page_history": _get_page_history,
     "list_proposals": _list_proposals,
     "propose_new_page": _propose_new_page,

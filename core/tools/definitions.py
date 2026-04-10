@@ -162,6 +162,30 @@ TOOLS: list[dict] = [
             },
         },
     },
+    # ── 4b ── compare_pages ───────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_pages",
+            "description": (
+                "Fetch multiple pages side-by-side for comparison. "
+                "Returns title, summary, and a content snippet (first 400 chars) for each page. "
+                "Use this when you suspect duplicate or near-duplicate pages and want to decide "
+                "whether to merge, archive, or keep them separate."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of 2–10 page UUIDs to compare.",
+                    },
+                },
+                "required": ["page_ids"],
+            },
+        },
+    },
     # ── 5 ── get_page_history ─────────────────────────────────────────────────
     {
         "type": "function",
@@ -1046,6 +1070,7 @@ AGENT_TOOLS: dict[str, list[str]] = {
     ],
     "proposer": [
         "search_pages", "get_page", "list_pages",
+        "compare_pages",
         "propose_new_page", "propose_page_edit",
         "list_agent_tasks", "complete_agent_task",
         "spawn_subagents",
@@ -1053,8 +1078,10 @@ AGENT_TOOLS: dict[str, list[str]] = {
     ],
     "reviewer": [
         "search_pages", "get_page", "list_pages", "get_page_history",
+        "compare_pages",
         "list_proposals", "review_proposal",
         "list_agent_tasks", "complete_agent_task",
+        "create_agent_task",
     ],
     "executor": [
         "list_proposals", "apply_proposal",
@@ -1067,6 +1094,7 @@ AGENT_TOOLS: dict[str, list[str]] = {
     ],
     "orchestrator": [
         "search_pages", "get_page", "list_pages",
+        "compare_pages",
         "list_proposals", "list_agent_tasks",
         "create_agent_task",
         "list_files", "list_ingest_records",
