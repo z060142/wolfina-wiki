@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     janitor_running_timeout_minutes: int = 5
     # Pending tasks older than this with no active maintenance run → nudge the scheduler.
     janitor_pending_timeout_minutes: int = 10
+    # Pending tasks older than this are abandoned (marked failed) — they've been nudged too long.
+    janitor_pending_abandon_hours: int = 2
     # Max times the janitor will re-queue a failed task before giving up.
     janitor_max_task_retries: int = 3
     # Done/failed tasks older than this are deleted to prevent DB bloat.

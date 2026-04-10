@@ -524,7 +524,9 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
     await _wait_for_flush_gap()
     orch_msg = (
         f"batch_id: {batch_id}\n\n"
-        "Evaluate the current wiki state and create tasks for specialist agents as needed."
+        "Evaluate the current wiki state and create tasks for specialist agents as needed.\n"
+        "IMPORTANT: Do NOT create ingest tasks — file ingestion is handled by a separate "
+        "pipeline and must not be triggered from here."
     )
     try:
         await _run_agent("orchestrator", orch_msg, db, batch_id=batch_id)
@@ -553,6 +555,9 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
             "to find any approved proposals, and apply them."
         ),
     }
+    from core.models.conversation import AgentTask, TaskStatus
+    from sqlalchemy import select as _select, func as _func
+
     for agent_type in ("research", "ingest", "proposer", "reviewer", "executor", "relation"):
         # Yield between each specialist stage — flush pipelines take priority.
         await _wait_for_flush_gap()
@@ -569,13 +574,31 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
             + "Call complete_agent_task with outcome=\"done\" or \"failed\" for each task when finished. "
             "If there are no tasks for you, do nothing."
         )
-        try:
-            await _run_agent(agent_type, specialist_msg, db, batch_id=batch_id)
-            await db.commit()
-            logger.info("Maintenance: %s done — batch_id=%s", agent_type, batch_id)
-        except Exception:
-            logger.exception("Maintenance: %s failed — batch_id=%s", agent_type, batch_id)
-            await db.rollback()
+        # Ingest tasks can exceed max_iterations in a single pass — keep retrying
+        # until no pending ingest tasks remain (up to a safety cap).
+        _max_passes = 10 if agent_type == "ingest" else 1
+        for _pass in range(_max_passes):
+            try:
+                await _run_agent(agent_type, specialist_msg, db, batch_id=batch_id)
+                await db.commit()
+                logger.info("Maintenance: %s pass %d done — batch_id=%s", agent_type, _pass + 1, batch_id)
+            except Exception:
+                logger.exception("Maintenance: %s pass %d failed — batch_id=%s", agent_type, _pass + 1, batch_id)
+                await db.rollback()
+                break
+            if agent_type == "ingest":
+                remaining = await db.scalar(
+                    _select(_func.count()).select_from(AgentTask).where(
+                        AgentTask.agent_type == "ingest",
+                        AgentTask.status == TaskStatus.pending,
+                    )
+                )
+                if not remaining:
+                    break
+                logger.info("Maintenance: %d ingest task(s) still pending, starting pass %d",
+                            remaining, _pass + 2)
+            else:
+                break
 
     logger.info("Maintenance pipeline complete — batch_id=%s", batch_id)
 
@@ -679,7 +702,7 @@ async def run_ingest_pipeline(
         orch_msg = (
             f"batch_id: {batch_id}\n\n"
             "INGEST ROUND 1: Create one ingest task per file listed below.\n"
-            "For each file, set agent_type='ingest', and include "
+            f"For each file, set agent_type='ingest', batch_id='{batch_id}', and include "
             '{"record_id": "<id>", "path": "<path>"} in context_json.\n\n'
             f"Files to process:\n{file_list_summary}"
         )
@@ -696,22 +719,42 @@ async def run_ingest_pipeline(
             record.status = IngestStatus.processing
         await db.commit()
 
-        # Run ingest agents
+        # Run ingest agents — retry until no pending ingest tasks remain for this batch
+        # (a single agent pass may not process all tasks if max_iterations is reached).
         ingest_agent_id = settings.ingest_agent_id
         ingest_msg = (
             f"batch_id: {batch_id}\n"
             f"ingest_agent_id: {ingest_agent_id}\n\n"
-            f"Use list_agent_tasks with agent_type=\"ingest\" and batch_id=\"{batch_id}\" "
-            "to find your pending tasks. For each task, read the file specified in context_json, "
+            "Use list_agent_tasks with agent_type=\"ingest\" and status=\"pending\" "
+            "(do NOT filter by batch_id — process all pending ingest tasks regardless of source). "
+            "For each task, read the file specified in context_json, "
             "extract a summary, and call complete_file_ingest then complete_agent_task."
         )
-        try:
-            await _run_agent("ingest", ingest_msg, db, batch_id=batch_id)
-            await db.commit()
-            logger.info("Ingest Round 1: ingest agent done — batch_id=%s", batch_id)
-        except Exception:
-            logger.exception("Ingest Round 1: ingest agent failed — batch_id=%s", batch_id)
-            await db.rollback()
+        from core.models.conversation import AgentTask, TaskStatus
+        from sqlalchemy import select as _select, func as _func
+        _max_ingest_passes = 10
+        for _pass in range(_max_ingest_passes):
+            try:
+                await _run_agent("ingest", ingest_msg, db, batch_id=batch_id)
+                await db.commit()
+                logger.info("Ingest Round 1: ingest agent pass %d done — batch_id=%s", _pass + 1, batch_id)
+            except Exception:
+                logger.exception("Ingest Round 1: ingest agent pass %d failed — batch_id=%s", _pass + 1, batch_id)
+                await db.rollback()
+                break
+            # Check if there are still pending ingest tasks for this batch
+            remaining = await db.scalar(
+                _select(_func.count()).select_from(AgentTask).where(
+                    AgentTask.agent_type == "ingest",
+                    AgentTask.batch_id == batch_id,
+                    AgentTask.status == TaskStatus.pending,
+                )
+            )
+            if not remaining:
+                logger.info("Ingest Round 1: all tasks complete after pass %d — batch_id=%s", _pass + 1, batch_id)
+                break
+            logger.info("Ingest Round 1: %d task(s) still pending, starting pass %d — batch_id=%s",
+                        remaining, _pass + 2, batch_id)
 
     # ── Round 2: orchestrator reads all summaries, creates proposer tasks ──────
     done_records = await db.scalars(
