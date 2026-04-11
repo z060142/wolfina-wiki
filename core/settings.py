@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     # ── Dynamic scheduler ─────────────────────────────────────────────────────
     scheduler_min_interval_seconds: int = 300    # 5 min  (high data rate)
-    scheduler_max_interval_seconds: int = 3600   # 1 hour (idle)
+    scheduler_max_interval_seconds: int = 86400  # 24 hours (idle)
     scheduler_rate_window_hours: int = 24        # look-back window for flush rate
     scheduler_target_rate: int = 10              # flushes/window that map to min_interval
 
