@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     # support extended thinking (e.g. Qwen3, Kimi-K2) skip the thinking phase.
     ollama_disable_thinking: bool = False
 
+    # ── Server binding ───────────────────────────────────────────────────────
+    # Set SERVER_HOST=0.0.0.0 to accept connections from other machines.
+    # Default is 127.0.0.1 (localhost only) for safety.
+    server_host: str = "127.0.0.1"
+    server_port: int = 8000
+
     # ── File read tool ────────────────────────────────────────────────────────
     # Comma-separated list of directories the LLM is allowed to read from.
     # Relative paths are resolved relative to the process working directory.
