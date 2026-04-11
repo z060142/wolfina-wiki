@@ -705,10 +705,13 @@ TOOLS: list[dict] = [
         "function": {
             "name": "quick_query",
             "description": (
-                "Drive a focused query agent that searches the wiki and files, then returns a "
-                "concise summary. The caller controls what to look for, how to summarise it, "
-                "and the word-count limit. Use this when you need a targeted answer without "
-                "occupying your own context window with raw search results.\n\n"
+                "Drive a focused query agent that fetches data from the wiki or files and returns "
+                "a concise summary. Use this ONLY for data retrieval — looking up existing "
+                "pages, content, history, or file contents.\n\n"
+                "DO NOT use quick_query for analytical or reasoning tasks such as: comparing "
+                "titles for similarity, deciding which pages are duplicates, evaluating quality, "
+                "or summarising page lists you already have. That reasoning is your job — do it "
+                "yourself using the information already in your context.\n\n"
                 "The query agent has access to: search_pages, get_page, list_pages, "
                 "get_related_pages, get_page_history, read_file, list_files.\n\n"
                 "Returns {\"summary\": \"...\", \"sources\": [...]} where sources lists the "

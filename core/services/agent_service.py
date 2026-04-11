@@ -265,12 +265,11 @@ Example maintenance tasks:
 == DUPLICATE PAGE DETECTION ==
 After reviewing recently updated pages, perform a duplicate check:
 
-1. Use quick_query to ask: "Which of these page titles are likely about the same topic?
-   List any suspicious pairs." Pass the recent page titles as context.
-   Example: quick_query(query="Do any of these wiki page titles describe the same topic?
-   Titles: [list them here]. Return suspicious duplicate pairs only.")
+1. Review the page titles you already retrieved from list_pages. Identify pairs whose titles
+   suggest the same topic (e.g. synonyms, singular/plural, same concept different wording).
+   Do this reasoning yourself — do NOT delegate it to quick_query.
 
-2. If quick_query identifies suspicious pairs, use compare_pages with their page_ids to
+2. For each suspicious pair you identified, use compare_pages with their page_ids to
    inspect the actual content side-by-side.
 
 3. If the pages are genuinely duplicate or highly overlapping, create a proposer task:
