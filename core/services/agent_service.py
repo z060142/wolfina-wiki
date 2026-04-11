@@ -408,12 +408,16 @@ async def run_flush_pipeline(
     conversation_text: str,
     batch_id: str,
     db: AsyncSession,
+    extra_proposer_instructions: str = "",
 ) -> None:
     """Process a flushed conversation window through the full agent pipeline.
 
     Runs: proposer → reviewer → executor → relation
     Each stage commits its work to the DB before the next stage begins.
     Flush pipelines take priority over the maintenance pipeline.
+
+    extra_proposer_instructions: optional text appended to the proposer's user message.
+        Use this to request source-specific analysis (e.g. character profiling for wolfchat).
     """
     global _flush_waiters, _flush_done
     _flush_waiters += 1
@@ -426,6 +430,8 @@ async def run_flush_pipeline(
         f"proposer_agent_id: {settings.proposer_agent_id}\n\n"
         f"--- CONVERSATION ---\n{conversation_text}"
     )
+    if extra_proposer_instructions:
+        proposer_msg += f"\n\n--- ADDITIONAL INSTRUCTIONS ---\n{extra_proposer_instructions}"
     try:
         await _run_agent("proposer", proposer_msg, db, batch_id=batch_id)
         await db.commit()

@@ -272,6 +272,7 @@ async def ingest_conversation(
     bot_label: str = cfg.get("bot_role_label", "chatbot")
     player_label: str = cfg.get("player_role_label", "player")
     source_id: str = cfg.get("conversation_window_source_id", "wolfchat")
+    character_analysis_instruction: str = cfg.get("flush_character_analysis_instruction", "")
 
     # Resolve turns
     turns: list[ConversationTurn]
@@ -340,7 +341,10 @@ async def ingest_conversation(
         messages_added += 1
 
         if should_flush:
-            await conversation_service.trigger_flush(window_id)
+            await conversation_service.trigger_flush(
+                window_id,
+                extra_proposer_instructions=character_analysis_instruction,
+            )
             flush_triggered = True
 
     logger.info(
