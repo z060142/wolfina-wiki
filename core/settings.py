@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     openai_compat_api_key: str = ""
 
     # Default model (used when a per-agent model is not set)
-    default_model: str = "llama3.2"
+    default_model: str = "qwen3.5:397b-cloud"
 
     # ── Per-agent model overrides (empty string = use default_model) ─────────
     research_agent_model: str = ""
