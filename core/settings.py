@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     openai_compat_api_key: str = ""
 
     # Default model (used when a per-agent model is not set)
-    default_model: str = "llama3.2"
+    default_model: str = "qwen3.5:397b-cloud"
 
     # ── Per-agent model overrides (empty string = use default_model) ─────────
     research_agent_model: str = ""
@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     # ── Dynamic scheduler ─────────────────────────────────────────────────────
     scheduler_min_interval_seconds: int = 300    # 5 min  (high data rate)
-    scheduler_max_interval_seconds: int = 3600   # 1 hour (idle)
+    scheduler_max_interval_seconds: int = 86400  # 24 hours (idle)
     scheduler_rate_window_hours: int = 24        # look-back window for flush rate
     scheduler_target_rate: int = 10              # flushes/window that map to min_interval
 
@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     janitor_running_timeout_minutes: int = 5
     # Pending tasks older than this with no active maintenance run → nudge the scheduler.
     janitor_pending_timeout_minutes: int = 10
+    # Pending tasks older than this are abandoned (marked failed) — they've been nudged too long.
+    janitor_pending_abandon_hours: int = 2
     # Max times the janitor will re-queue a failed task before giving up.
     janitor_max_task_retries: int = 3
     # Done/failed tasks older than this are deleted to prevent DB bloat.
@@ -78,6 +80,12 @@ class Settings(BaseSettings):
     # Set to true to pass {"thinking": False} in extra_body so models that
     # support extended thinking (e.g. Qwen3, Kimi-K2) skip the thinking phase.
     ollama_disable_thinking: bool = False
+
+    # ── Server binding ───────────────────────────────────────────────────────
+    # Set SERVER_HOST=0.0.0.0 to accept connections from other machines.
+    # Default is 127.0.0.1 (localhost only) for safety.
+    server_host: str = "127.0.0.1"
+    server_port: int = 8000
 
     # ── File read tool ────────────────────────────────────────────────────────
     # Comma-separated list of directories the LLM is allowed to read from.

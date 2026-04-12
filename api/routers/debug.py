@@ -148,7 +148,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 #conn.dead{color:var(--red)}
 /* ── layout ── */
 #layout{display:flex;flex-direction:column;height:calc(100% - 32px)}
-#panels{flex:1;display:grid;grid-template-columns:270px 1fr 270px;gap:1px;background:var(--border);overflow:hidden;min-height:0}
+#panels{flex:1;display:grid;grid-template-columns:270px 1fr 270px 290px;gap:1px;background:var(--border);overflow:hidden;min-height:0}
 .panel{background:var(--panel);padding:10px;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
 .panel-hdr{color:var(--blue);font-size:9px;letter-spacing:2px;text-transform:uppercase;border-bottom:1px solid var(--border2);padding-bottom:4px;flex-shrink:0}
 /* ── timeline ── */
@@ -179,6 +179,9 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .agent-card[data-agent="director"].thinking{border-color:#d060f0;background:#100818}
 .agent-card[data-agent="director"].tool_call{border-color:#e080ff;background:#160a1e}
 .agent-card[data-agent="director"].done{border-color:#d060f0;background:#0c0616}
+.agent-card[data-agent="quick_query"].thinking{border-color:#20d0b0;background:#041814}
+.agent-card[data-agent="quick_query"].tool_call{border-color:#40e8c8;background:#062018}
+.agent-card[data-agent="quick_query"].done{border-color:#20d0b0;background:#041210}
 .agent-row{display:flex;align-items:center;gap:8px;margin-bottom:3px}
 .agent-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--idle)}
 .agent-dot.idle{background:var(--idle)}
@@ -243,6 +246,23 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .ev-director_reply .badge{background:#061418;color:var(--teal)}
 .ev-director_error .badge{background:#180606;color:var(--red)}
 .ev-pipeline_triggered .badge{background:#181000;color:var(--amber)}
+.ev-quick_query_start .badge{background:#041814;color:var(--teal)}
+.ev-quick_query_done .badge{background:#041410;color:#40e8c8}
+.ev-quick_query_error .badge{background:#180606;color:var(--red)}
+/* ── quick query panel ── */
+#qq-query{background:#041814;border:1px solid #1a3830;border-radius:3px;padding:7px 9px;font-size:10px;color:var(--teal);word-break:break-word;min-height:28px;margin-bottom:6px}
+#qq-query .qq-label{color:var(--dim);font-size:9px;letter-spacing:1px;text-transform:uppercase;margin-bottom:3px}
+#qq-log{display:flex;flex-direction:column;gap:3px;flex:1;overflow-y:auto}
+.qq-entry{border-left:2px solid var(--border2);padding:3px 6px;font-size:10px;line-height:1.4}
+.qq-entry.tool_call{border-color:var(--purple)}
+.qq-entry.tool_result{border-color:#8060c0}
+.qq-entry.summary{border-color:var(--teal);background:#041410}
+.qq-entry.error{border-color:var(--red)}
+.qq-entry .qq-tag{font-size:9px;color:var(--dim);margin-right:4px}
+.qq-entry .qq-body{color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qq-entry.summary .qq-body{white-space:pre-wrap;word-break:break-word;color:var(--teal)}
+.qq-sources{font-size:9px;color:var(--dim);margin-top:3px;padding-left:4px}
+.qq-idle{color:var(--dim);font-size:11px;padding:8px 0}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes glow-amber{from{box-shadow:0 0 4px #f0a03060}to{box-shadow:0 0 10px #f0a03099}}
 #empty-msg{color:var(--dim);font-size:11px;padding:8px 0}
@@ -267,6 +287,12 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <div class="panel-hdr">Agent Arena</div>
       <div id="agents-grid"></div>
     </div>
+    <!-- Quick Query Monitor -->
+    <div class="panel" id="panel-quickquery" style="display:flex;flex-direction:column">
+      <div class="panel-hdr" style="color:var(--teal)">Quick Query Monitor</div>
+      <div id="qq-query"><div class="qq-label">query</div><span id="qq-query-text" style="color:var(--dim)">idle</span></div>
+      <div id="qq-log"><div class="qq-idle">No queries yet.</div></div>
+    </div>
     <!-- Scheduler + Wiki -->
     <div class="panel" id="panel-right">
       <div class="panel-hdr">Scheduler</div>
@@ -281,10 +307,11 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 </div>
 
 <script>
-const AGENT_TYPES = ['director','orchestrator','research','proposer','reviewer','executor','relation','ingest','subagent'];
+const AGENT_TYPES = ['director','orchestrator','research','proposer','reviewer','executor','relation','ingest','subagent','quick_query'];
 const MAX_TIMELINE = 200;
 const MAX_PROPOSALS = 12;
 const MAX_TASKS = 15;
+const MAX_QQ_LOG = 60;
 
 const state = {
   windows: {},      // id → {id, status, message_count, total_char_count, external_source_id, ...}
@@ -292,6 +319,8 @@ const state = {
   scheduler: { flush_rate: 0, current_interval_seconds: 0 },
   proposals: [],    // [{id, status, proposed_title, proposer_agent_id, batch_id}]
   tasks: [],        // [{id, agent_type, instruction, status, batch_id}]
+  qqLog: [],        // [{kind, text, ts}]  — quick_query activity log
+  qqQuery: '',      // current/last query string
 };
 
 AGENT_TYPES.forEach(t => state.agents[t] = { status: 'idle', action: '', args: '', iter: 0 });
@@ -394,8 +423,27 @@ function renderTasks() {
   }).join('');
 }
 
+function renderQuickQuery() {
+  document.getElementById('qq-query-text').textContent = state.qqQuery || 'idle';
+  document.getElementById('qq-query-text').style.color = state.qqQuery ? 'var(--teal)' : 'var(--dim)';
+  const el = document.getElementById('qq-log');
+  if (!state.qqLog.length) {
+    el.innerHTML = '<div class="qq-idle">No queries yet.</div>';
+    return;
+  }
+  el.innerHTML = state.qqLog.map(e => {
+    const tag = e.kind === 'tool_call' ? '→' : e.kind === 'tool_result' ? '←' : e.kind === 'summary' ? '■' : e.kind === 'error' ? '✗' : '·';
+    const extraCls = e.kind === 'summary' ? ` ${e.sources && e.sources.length ? `<div class="qq-sources">sources: ${esc(e.sources.slice(0,6).join(', '))}</div>` : ''}` : '';
+    return `<div class="qq-entry ${esc(e.kind)}">
+      <span class="qq-tag">${esc(tag)}</span><span class="qq-body">${esc(e.text)}</span>${extraCls}
+    </div>`;
+  }).join('');
+  // Keep scrolled to bottom
+  el.scrollTop = el.scrollHeight;
+}
+
 function renderAll() {
-  renderWindows(); renderAgents(); renderScheduler(); renderProposals(); renderTasks();
+  renderWindows(); renderAgents(); renderScheduler(); renderProposals(); renderTasks(); renderQuickQuery();
 }
 
 // ── timeline ──────────────────────────────────────────────────────────────────
@@ -453,6 +501,9 @@ function buildDetail(ev) {
     case 'director_reply': return `director reply: "${(ev.text||'').slice(0,100)}"`;
     case 'director_error': return `director ERROR: ${ev.message||''}`;
     case 'pipeline_triggered': return `pipeline: ${ev.pipeline_type} (source=${ev.source||'?'})`;
+    case 'quick_query_start': return `query="${(ev.query||'').slice(0,80)}" max_words=${ev.max_words||''}`;
+    case 'quick_query_done': return `query="${(ev.query||'').slice(0,60)}" → "${(ev.summary_preview||'').slice(0,60)}"`;
+    case 'quick_query_error': return `error: ${ev.error||''}`;
     default: return JSON.stringify(ev).slice(0,120);
   }
 }
@@ -617,6 +668,32 @@ function handleEvent(ev) {
     state.scheduler.flush_rate = ev.flush_rate;
     state.scheduler.current_interval_seconds = ev.current_interval;
     renderScheduler(); return;
+  }
+  if (t === 'quick_query_start') {
+    state.qqQuery = ev.query || '';
+    state.qqLog = [{ kind: 'start', text: `query: ${ev.query||''} (max ${ev.max_words||'?'} words)` }];
+    renderQuickQuery(); return;
+  }
+  if (t === 'quick_query_done') {
+    state.qqLog.push({ kind: 'summary', text: ev.summary_preview || '(no summary)', sources: ev.sources || [] });
+    if (state.qqLog.length > MAX_QQ_LOG) state.qqLog.shift();
+    renderQuickQuery(); return;
+  }
+  if (t === 'quick_query_error') {
+    state.qqLog.push({ kind: 'error', text: ev.error || 'unknown error' });
+    if (state.qqLog.length > MAX_QQ_LOG) state.qqLog.shift();
+    renderQuickQuery(); return;
+  }
+  // Intercept agent events for quick_query agent into the dedicated panel
+  if ((t === 'agent_tool_call' || t === 'agent_thinking' || t === 'agent_tool_result') && ev.agent_type === 'quick_query') {
+    if (t === 'agent_tool_call') {
+      state.qqLog.push({ kind: 'tool_call', text: `${ev.tool}  ${(ev.args_preview||'').slice(0,120)}` });
+    } else if (t === 'agent_tool_result') {
+      state.qqLog.push({ kind: 'tool_result', text: `${ev.tool} ${ev.ok?'ok':'ERROR'}  ${(ev.result_preview||'').slice(0,120)}` });
+    }
+    if (state.qqLog.length > MAX_QQ_LOG) state.qqLog.shift();
+    renderQuickQuery();
+    // Fall through so agent arena also updates
   }
 }
 

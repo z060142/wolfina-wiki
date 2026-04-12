@@ -173,16 +173,19 @@ def _format_conversation(messages: list[ConversationMessage]) -> str:
     return "\n".join(lines)
 
 
-async def trigger_flush(window_id: str) -> None:
+async def trigger_flush(window_id: str, extra_proposer_instructions: str = "") -> None:
     """Launch the flush pipeline as an independent background task.
 
     Opens its own DB session so it does not interfere with the caller's session.
     Records flush timestamp in the scheduler for dynamic interval calculation.
+
+    extra_proposer_instructions: optional text appended to the proposer's user message,
+        allowing callers (e.g. wolfchat plugin) to request additional analysis passes.
     """
-    asyncio.create_task(_flush_background(window_id))
+    asyncio.create_task(_flush_background(window_id, extra_proposer_instructions))
 
 
-async def _flush_background(window_id: str) -> None:
+async def _flush_background(window_id: str, extra_proposer_instructions: str = "") -> None:
     """Background coroutine that actually runs the flush pipeline."""
     from core.services.agent_service import run_flush_pipeline
     from core.services.scheduler_service import scheduler
@@ -221,7 +224,12 @@ async def _flush_background(window_id: str) -> None:
     # Run the agent pipeline in its own transaction scope.
     async with AsyncSessionLocal() as pipeline_db:
         try:
-            await run_flush_pipeline(conversation_text, batch_id, pipeline_db)
+            await run_flush_pipeline(
+                conversation_text,
+                batch_id,
+                pipeline_db,
+                extra_proposer_instructions=extra_proposer_instructions,
+            )
         except Exception:
             logger.exception("Flush pipeline error — window_id=%s", window_id)
 

@@ -49,7 +49,16 @@ Specialist agents follow this pattern in MAINTENANCE MODE:
 1. Call list_agent_tasks (filter by your agent_type and the provided batch_id) to find pending tasks.
 2. Execute each task using your available tools.
 3. Call complete_agent_task with outcome="done" or outcome="failed" (include error_message if failed).
-4. If there are no tasks assigned to you, do nothing and stop."""
+4. If there are no tasks assigned to you, do nothing and stop.
+
+== TOOL FAILURE HANDLING ==
+When a tool returns an error:
+- Analyse the error carefully before retrying. Do NOT call the same tool with identical parameters again.
+- 403 Role Violation: stop immediately. Call complete_agent_task with outcome="failed" and include the
+  violation details in error_message. Do not attempt to work around role restrictions.
+- "already exists" / duplicate errors: treat as success and move on — the goal is already achieved.
+- Other errors: fix the parameter or approach based on the error message, then retry once.
+  If it fails a second time with the same error, mark the task failed with a clear error_message."""
 
 BLOCK_NO_DUPLICATE_TASKS = """\
 == DUPLICATE PREVENTION ==
@@ -60,11 +69,18 @@ Before creating any task or proposal, check whether an equivalent one already ex
 
 BLOCK_PROPOSAL_GUIDELINES = """\
 == PROPOSAL GUIDELINES ==
-- Prefer editing existing pages (propose_page_edit) over creating new ones (propose_new_page).
-- Always search first — call search_pages before deciding to create a new page.
+- SYNC BEFORE CREATE: Always call search_pages before proposing a new page. Creating a duplicate
+  page when one already exists is system contamination — never create a parallel page on the same
+  topic. If a relevant page exists, update it with propose_page_edit instead.
 - Each proposal must include a clear, specific rationale.
 - Be conservative: only propose content that is clearly supported by the source material.
 - One pending proposal per page at a time — do not stack multiple proposals on the same page.
+
+== ENCYCLOPAEDIC TONE ==
+Transform conversational language into objective, encyclopaedic prose:
+- Remove first-person voice, exclamations, hedging phrases, and social pleasantries.
+- State facts directly and assertively: "X is Y", not "it seems like X might be Y".
+- Use neutral, formal language appropriate for a reference wiki.
 
 == SLUG FORMAT (critical) ==
 Slugs must match ^[a-z0-9]+(?:-[a-z0-9]+)*$ — ASCII lowercase letters/numbers, hyphen-separated.

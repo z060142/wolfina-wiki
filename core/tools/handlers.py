@@ -116,6 +116,30 @@ async def _get_related_pages(inp: dict, db: AsyncSession) -> dict:
     return {"related_pages": [_page_out(p) for p in pages]}
 
 
+async def _compare_pages(inp: dict, db: AsyncSession) -> dict:
+    """Return side-by-side title/summary/content snippet for multiple pages."""
+    page_ids = inp.get("page_ids") or []
+    if not page_ids or len(page_ids) < 2:
+        return {"error": "Provide at least 2 page_ids to compare."}
+    results = []
+    for pid in page_ids:
+        try:
+            page = await page_service.get_page(db, pid)
+            snippet = (page.content or "")[:400]
+            results.append({
+                "id": page.id,
+                "title": page.title,
+                "slug": page.slug,
+                "summary": page.summary,
+                "content_snippet": snippet + ("…" if len(page.content or "") > 400 else ""),
+                "status": page.status,
+                "updated_at": page.updated_at.isoformat() if page.updated_at else None,
+            })
+        except Exception as exc:
+            results.append({"id": pid, "error": str(exc)})
+    return {"pages": results}
+
+
 async def _get_page_history(inp: dict, db: AsyncSession) -> dict:
     versions = await version_service.get_history(db, inp["page_id"])
     return {
@@ -174,10 +198,18 @@ async def _propose_new_page(inp: dict, db: AsyncSession) -> dict:
 async def _propose_page_edit(inp: dict, db: AsyncSession) -> dict:
     if not inp.get("target_page_id"):
         return {"error": "target_page_id is required for propose_page_edit. Use get_page or search_pages to find the page UUID first."}
+    # proposed_title is optional for edits — keep the existing title if not provided.
+    proposed_title = inp.get("proposed_title")
+    if not proposed_title:
+        try:
+            existing = await page_service.get_page(db, inp["target_page_id"])
+            proposed_title = existing.title
+        except Exception:
+            return {"error": f"target_page_id '{inp['target_page_id']}' not found. Cannot determine existing title."}
     source_refs = inp.get("source_refs")
     data = ProposalCreate(
         target_page_id=inp["target_page_id"],
-        proposed_title=inp.get("proposed_title"),
+        proposed_title=proposed_title,
         proposed_content=inp["proposed_content"],
         proposed_summary=inp["proposed_summary"],
         proposed_source_refs=json.dumps(source_refs) if source_refs else None,
@@ -240,14 +272,17 @@ async def _add_page_relation(inp: dict, db: AsyncSession) -> dict:
 
 
 async def _create_agent_task(inp: dict, db: AsyncSession) -> dict:
+    import uuid as _uuid_mod
     ctx = inp.get("context_json")
     if isinstance(ctx, dict):
         ctx = json.dumps(ctx, ensure_ascii=False)
+    # Ensure every task has a batch_id for traceability; generate one if LLM omitted it.
+    batch_id = inp.get("batch_id") or str(_uuid_mod.uuid4())
     task = AgentTask(
         agent_type=inp["agent_type"],
         instruction=inp["instruction"],
         context_json=ctx,
-        batch_id=inp.get("batch_id"),
+        batch_id=batch_id,
         status=TaskStatus.pending,
     )
     db.add(task)
@@ -938,6 +973,7 @@ _HANDLERS: dict[str, Any] = {
     "get_page": _get_page,
     "list_pages": _list_pages,
     "get_related_pages": _get_related_pages,
+    "compare_pages": _compare_pages,
     "get_page_history": _get_page_history,
     "list_proposals": _list_proposals,
     "propose_new_page": _propose_new_page,
@@ -978,4 +1014,10 @@ async def dispatch_tool(tool_name: str, tool_input: dict, db: AsyncSession) -> d
         error_msg = f"{type(exc).__name__}: {exc}"
         logger.warning("Tool %s raised %s", tool_name, error_msg)
         debug_stream.emit("tool_error", tool=tool_name, error=error_msg)
+        # Roll back any failed transaction so the session remains usable for
+        # subsequent tool calls in the same loop iteration.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         return {"error": error_msg}

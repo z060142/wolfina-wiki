@@ -133,8 +133,10 @@ async def run_task_janitor(db: AsyncSession) -> JanitorReport:
 
     await db.flush()  # apply deletes before the gap checks below
 
-    # ── 4. Stale pending tasks: nudge the scheduler ───────────────────────────
+    # ── 4. Stale pending tasks: abandon very old ones, nudge for the rest ────────
+    abandon_cutoff = now - timedelta(hours=settings.janitor_pending_abandon_hours)
     stale_cutoff = now - timedelta(minutes=settings.janitor_pending_timeout_minutes)
+
     stale_pending_tasks = (await db.scalars(
         select(AgentTask).where(
             AgentTask.status == TaskStatus.pending,
@@ -142,14 +144,32 @@ async def run_task_janitor(db: AsyncSession) -> JanitorReport:
         )
     )).all()
 
-    if stale_pending_tasks:
+    nudge_needed = False
+    for task in stale_pending_tasks:
+        if task.created_at.replace(tzinfo=timezone.utc) < abandon_cutoff:
+            # Been pending for too long — give up rather than nudging forever.
+            task.status = TaskStatus.failed
+            task.completed_at = now
+            task.error_message = (
+                "[janitor] abandoned after exceeding pending timeout "
+                f"({settings.janitor_pending_abandon_hours}h)"
+            )
+            logger.warning(
+                "Janitor: abandoning task %s (%s) — pending since %s",
+                task.id, task.agent_type, task.created_at,
+            )
+        else:
+            nudge_needed = True
+
+    if nudge_needed:
+        still_stale = [t for t in stale_pending_tasks if t.status == TaskStatus.pending]
         by_type: dict[str, int] = {}
-        for t in stale_pending_tasks:
+        for t in still_stale:
             by_type[t.agent_type] = by_type.get(t.agent_type, 0) + 1
-        report.stale_pending = len(stale_pending_tasks)
+        report.stale_pending = len(still_stale)
         logger.warning(
             "Janitor: %d stale pending task(s) found %s — nudging maintenance",
-            len(stale_pending_tasks),
+            len(still_stale),
             dict(by_type),
         )
         from core.services.scheduler_service import scheduler
