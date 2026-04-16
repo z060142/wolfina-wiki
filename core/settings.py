@@ -97,5 +97,20 @@ class Settings(BaseSettings):
     # Maximum file size (bytes) the read_file tool will return (default 128 KB).
     file_read_max_bytes: int = 131072
 
+    # ── Rule-driven maintenance ───────────────────────────────────────────────
+    # Max agent tasks the orchestrator may create in a single maintenance cycle.
+    # Prevents the orchestrator from flooding the queue each run.
+    maintenance_max_tasks_per_cycle: int = 10
+    # Minimum issue score [0.0–1.0] required before creating an agent task.
+    # Issues below this threshold are logged but skipped.
+    maintenance_issue_min_score: float = 0.3
+    # Pages updated within this many minutes are skipped by orphan / stub scanners
+    # to avoid racing with the flush pipeline that just wrote them.
+    maintenance_new_page_grace_minutes: int = 30
+    # Minimum content length (chars) below which a page is flagged as a stub.
+    maintenance_stub_page_min_chars: int = 150
+    # Ingest records stuck in pending/processing longer than this are flagged.
+    maintenance_ingest_stuck_minutes: int = 30
+
 
 settings = Settings()

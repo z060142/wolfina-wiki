@@ -31,3 +31,4 @@ def import_models() -> None:  # noqa: F401
     import core.models.conversation  # noqa: F401
     import core.models.ingest  # noqa: F401
     import core.models.director  # noqa: F401
+    import core.models.maintenance  # noqa: F401

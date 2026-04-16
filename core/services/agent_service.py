@@ -49,6 +49,7 @@ from core.services.prompt_blocks import (
     BLOCK_PROPOSAL_GUIDELINES,
     BLOCK_RELATION_TYPES,
     BLOCK_ROLE_SEPARATION,
+    BLOCK_RULE_DRIVEN_ORCHESTRATOR,
     BLOCK_SPAWN_SUBAGENTS,
     build_prompt,
 )
@@ -241,41 +242,28 @@ _RESEARCH_PROMPT = build_prompt(
     ],
 )
 
-_ORCHESTRATOR_PROMPT = build_prompt(
-    role=(
-        "You are the Orchestrator agent for the Wolfina Wiki system.\n"
-        "Your job is to evaluate the current state of the wiki and create a prioritised work queue\n"
-        "for specialist agents (research, proposer, reviewer, executor, relation, ingest)."
-    ),
-    sections=[
-        """\
-== MAINTENANCE TASKS ==
-1. Use list_pages to review recently updated pages.
-2. Use list_proposals to check for stale pending/approved proposals.
-3. Use list_agent_tasks to see what is already queued.
-4. Create maintenance tasks using create_agent_task as needed.
-
-Example maintenance tasks:
-- Ask research agent to summarise orphaned pages
-- Ask proposer agent to merge near-duplicate pages
-- Ask reviewer agent to review long-pending proposals
-- Ask executor agent to apply all approved proposals
-- Ask relation agent to link recently created pages""",
-        """\
-== DUPLICATE PAGE DETECTION ==
-After reviewing recently updated pages, perform a duplicate check:
-
-1. Review the page titles you already retrieved from list_pages. Identify pairs whose titles
-   suggest the same topic (e.g. synonyms, singular/plural, same concept different wording).
-   Do this reasoning yourself — do NOT delegate it to quick_query.
-
-2. For each suspicious pair you identified, use compare_pages with their page_ids to
-   inspect the actual content side-by-side.
-
-3. If the pages are genuinely duplicate or highly overlapping, create a proposer task:
+def _build_orchestrator_prompt() -> str:
+    """Build the orchestrator prompt, interpolating runtime settings."""
+    block = BLOCK_RULE_DRIVEN_ORCHESTRATOR.format(
+        min_score=settings.maintenance_issue_min_score,
+        max_tasks=settings.maintenance_max_tasks_per_cycle,
+    )
+    return build_prompt(
+        role=(
+            "You are the Orchestrator agent for the Wolfina Wiki system.\n"
+            "Your job is to triage a pre-scanned list of maintenance issues and create\n"
+            "agent tasks for the ones that require LLM-assisted action."
+        ),
+        sections=[
+            block,
+            """\
+== DUPLICATE CANDIDATE VERIFICATION ==
+When the issue list contains a duplicate_candidate issue:
+1. Call compare_pages with the two page_ids from the evidence field.
+2. If the content genuinely overlaps (same topic, redundant facts), create a proposer task:
    - agent_type: "proposer"
-   - instruction: "Merge duplicate pages: consolidate the content of '<title A>' into
-     '<title B>', keeping all unique facts. Then propose to archive '<title A>'."
+   - instruction: "Merge duplicate pages: consolidate '<title A>' into '<title B>', keeping
+     all unique facts. Then propose to archive '<title A>'."
    - context_json: {
        "action": "merge_pages",
        "source_page_id": "<page A id — to be merged from>",
@@ -284,39 +272,15 @@ After reviewing recently updated pages, perform a duplicate check:
        "target_title": "<title B>",
        "merge_reason": "<one sentence explaining why they are duplicates>"
      }
+3. If the pages are merely related (not duplicates), skip the issue — no task needed.""",
+        ],
+        blocks=[
+            BLOCK_NO_DUPLICATE_TASKS,
+        ],
+    )
 
-4. Only flag pairs where the content genuinely overlaps. Skip pairs that are merely
-   related topics.""",
-        """\
-== INGEST PLANNING (Round 1 — per-file scanning) ==
-When the mode includes ingest work:
-1. Use list_files to discover all files in the allowed directories.
-2. Use list_ingest_records to see known files and their hashes/summaries.
-3. For files that are NEW (not in records) or CHANGED (hash mismatch — hash is in context_json):
-   - Create an ingest task: agent_type="ingest", instruction describes the file to process.
-   - Include {"path": "<absolute_path>", "record_id": "<id_if_existing>"} in context_json.
-4. Do NOT create ingest tasks for files already status=done with an unchanged hash.""",
-        """\
-== INGEST PLANNING (Round 2 — cross-file synthesis) ==
-When all pending ingest tasks are done:
-1. Use list_ingest_records with status="done" to read all file summaries.
-2. Use list_pages to see current wiki state.
-3. Decide how to group files into wiki pages (many-to-many is fine).
-4. Create proposer tasks with instructions referencing specific record IDs and target page strategy.
-   Include relevant record_ids in context_json so the ingest agent can re-read summaries.""",
-        """\
-== TASK CREATION RULES ==
-Be specific in every task instruction — include record IDs, page IDs, or file paths in context_json.
 
-Before creating new tasks of any type, call list_agent_tasks and count pending tasks per agent_type.
-If a given agent_type already has 3 or more pending tasks, do NOT add more tasks of that type —
-the backlog is already sufficient. Note this in your reasoning and move on.""",
-    ],
-    blocks=[
-        BLOCK_NO_DUPLICATE_TASKS,
-        BLOCK_SPAWN_SUBAGENTS,
-    ],
-)
+_ORCHESTRATOR_PROMPT = _build_orchestrator_prompt()
 
 _INGEST_PROMPT = build_prompt(
     role=(
@@ -514,43 +478,66 @@ async def run_flush_pipeline(
 
 
 async def run_maintenance_pipeline(db: AsyncSession) -> None:
-    """Scheduled maintenance: orchestrator creates tasks, then specialists execute them.
+    """Scheduled maintenance: scan → orchestrator dispatches → specialists execute.
 
-    Runs: orchestrator → research → ingest → proposer → reviewer → executor → relation
+    Runs: [deterministic scanners] → orchestrator → proposer → reviewer → executor → relation
+
+    Key design: scanners run first with no LLM, producing a list of concrete issues.
+    The orchestrator receives that list and only creates tasks for issues that need
+    semantic judgment.  Research is not part of routine maintenance.
+
     Each specialist processes ALL pending tasks of its type (any source, any batch_id),
     including tasks created by the Director agent.
     """
     import uuid
+    from core.services.maintenance_scanners import format_issue_digest, run_all_scanners
+
     batch_id = str(uuid.uuid4())
     logger.info("Maintenance pipeline start — batch_id=%s", batch_id)
 
-    # 1. Orchestrator builds the work queue
-    # Yield to any waiting flush pipeline before starting.
+    # ── Stage 0: Deterministic scanners (no LLM, no token cost) ──────────────
+    await _wait_for_flush_gap()
+    try:
+        open_issues = await run_all_scanners(db)
+        issue_digest = format_issue_digest(open_issues)
+        logger.info(
+            "Maintenance: scanners found %d open issue(s) — batch_id=%s",
+            len(open_issues), batch_id,
+        )
+        debug_stream.emit(
+            "maintenance_scan_complete",
+            batch_id=batch_id,
+            open_issue_count=len(open_issues),
+        )
+    except Exception:
+        logger.exception("Maintenance: scanner stage failed — batch_id=%s", batch_id)
+        issue_digest = "Scanner stage failed; no issue data available."
+
+    # ── Stage 1: Orchestrator dispatches tasks based on issue list ────────────
     await _wait_for_flush_gap()
     orch_msg = (
-        f"batch_id: {batch_id}\n\n"
-        "Evaluate the current wiki state and create tasks for specialist agents as needed.\n"
-        "IMPORTANT: Do NOT create ingest tasks — file ingestion is handled by a separate "
-        "pipeline and must not be triggered from here."
+        f"batch_id: {batch_id}\n"
+        f"orchestrator_agent_id: {settings.orchestrator_agent_id}\n\n"
+        f"{issue_digest}\n\n"
+        "Triage the issues above and create agent tasks for those that require action.\n"
+        "Call list_agent_tasks once first to see what is already queued.\n"
+        "Do NOT create ingest tasks — file ingestion is handled by a separate pipeline.\n"
+        "Do NOT create research tasks — research is not part of routine maintenance."
     )
     try:
         await _run_agent("orchestrator", orch_msg, db, batch_id=batch_id)
         await db.commit()
+        logger.info("Maintenance: orchestrator done — batch_id=%s", batch_id)
     except Exception:
         logger.exception("Maintenance: orchestrator failed — batch_id=%s", batch_id)
         await db.rollback()
         return
 
-    # 2. Run each specialist against its pending tasks in this batch
-    # Note: reviewer and executor also handle any globally pending/approved proposals
-    # (maintenance proposer proposals do not carry the maintenance batch_id).
+    # ── Stage 2: Specialists execute their queued tasks ───────────────────────
+    # research is intentionally excluded: it is not part of routine maintenance.
+    # reviewer and executor also sweep globally pending/approved proposals so
+    # nothing gets stuck even if the flush pipeline's reviewer/executor had an error.
     _extra: dict[str, str] = {
-        "ingest": (
-            "For each ingest task, read the file at the path given in context_json, "
-            "produce a summary, then call complete_file_ingest (using the record_id from context_json) "
-            "and complete_agent_task. If context_json has no record_id, use list_ingest_records "
-            "to find the matching record by path, or skip and mark the task failed with a clear error."
-        ),
         "reviewer": (
             "Also use list_proposals with status=\"pending\" (no batch_id filter) "
             "to find any proposals awaiting review, and review them."
@@ -563,8 +550,7 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
     from core.models.conversation import AgentTask, TaskStatus
     from sqlalchemy import select as _select, func as _func
 
-    for agent_type in ("research", "ingest", "proposer", "reviewer", "executor", "relation"):
-        # Yield between each specialist stage — flush pipelines take priority.
+    for agent_type in ("proposer", "reviewer", "executor", "relation"):
         await _wait_for_flush_gap()
         agent_id = getattr(settings, f"{agent_type}_agent_id")
         extra = _extra.get(agent_type, "")
@@ -579,31 +565,13 @@ async def run_maintenance_pipeline(db: AsyncSession) -> None:
             + "Call complete_agent_task with outcome=\"done\" or \"failed\" for each task when finished. "
             "If there are no tasks for you, do nothing."
         )
-        # Ingest tasks can exceed max_iterations in a single pass — keep retrying
-        # until no pending ingest tasks remain (up to a safety cap).
-        _max_passes = 10 if agent_type == "ingest" else 1
-        for _pass in range(_max_passes):
-            try:
-                await _run_agent(agent_type, specialist_msg, db, batch_id=batch_id)
-                await db.commit()
-                logger.info("Maintenance: %s pass %d done — batch_id=%s", agent_type, _pass + 1, batch_id)
-            except Exception:
-                logger.exception("Maintenance: %s pass %d failed — batch_id=%s", agent_type, _pass + 1, batch_id)
-                await db.rollback()
-                break
-            if agent_type == "ingest":
-                remaining = await db.scalar(
-                    _select(_func.count()).select_from(AgentTask).where(
-                        AgentTask.agent_type == "ingest",
-                        AgentTask.status == TaskStatus.pending,
-                    )
-                )
-                if not remaining:
-                    break
-                logger.info("Maintenance: %d ingest task(s) still pending, starting pass %d",
-                            remaining, _pass + 2)
-            else:
-                break
+        try:
+            await _run_agent(agent_type, specialist_msg, db, batch_id=batch_id)
+            await db.commit()
+            logger.info("Maintenance: %s done — batch_id=%s", agent_type, batch_id)
+        except Exception:
+            logger.exception("Maintenance: %s failed — batch_id=%s", agent_type, batch_id)
+            await db.rollback()
 
     logger.info("Maintenance pipeline complete — batch_id=%s", batch_id)
 
